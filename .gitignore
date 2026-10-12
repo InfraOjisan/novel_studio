@@ -1,0 +1,16 @@
+# 秘密情報
+.env
+*.key
+
+# 作品（自分の小説はリポジトリに入れない）
+works/
+
+# python / macOS
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+
+# studio
+studio/.cache/
+studio/settings.json

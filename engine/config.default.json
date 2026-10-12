@@ -1,0 +1,197 @@
+{
+  "_comment": "novel_studio v1.0 の既定値。scaffold.py が brief.json から chapters・字数・slot_plan・slot_names・audience・banned を上書きする。",
+  "chapters": 5,
+  "chapter_chars": {
+    "target": 3000,
+    "min": 2500,
+    "max": 4500
+  },
+  "total_chars": {
+    "min": 12000,
+    "max": 23000
+  },
+  "canon_max_chars": 16000,
+  "max_attempts": 3,
+  "max_design_attempts": 5,
+  "max_parse_retries": 2,
+  "max_ledger_attempts": 2,
+  "prev_tail_chars": 1000,
+  "ledger_recent_full": 2,
+  "packet_warn_chars": 150000,
+  "pause_after_canon": true,
+  "human_approval": true,
+  "require_insert_section": true,
+  "timeout_sec": 3600,
+  "budget_usd": null,
+  "audience": "",
+  "given_chapters": [],
+  "series_files": [],
+  "ledger_fields": [
+    "SUMMARY:",
+    "FACT:",
+    "STATE:",
+    "PLACE:",
+    "INSERT:",
+    "OPEN:",
+    "LAST:"
+  ],
+  "slot_names": {},
+  "slot_plan": {},
+  "guard": {
+    "manifest": "guard/manifest.json",
+    "stop_file": "STOP",
+    "corpus_dir": "guard/corpus",
+    "overlap_chars": 30,
+    "protected": [
+      "BRIEF.md",
+      "brief.json",
+      "AGENTS.md",
+      "config.json",
+      "tools/*",
+      "prompts/*",
+      "templates/*",
+      "series/*",
+      "guard/corpus/*"
+    ],
+    "allowed_top": [
+      "BRIEF.md",
+      "brief.json",
+      "AGENTS.md",
+      "KICKOFF.md",
+      "config.json",
+      "tools",
+      "prompts",
+      "templates",
+      "series",
+      "guard",
+      "canon",
+      "state",
+      "chapters",
+      "work",
+      "output",
+      "logs",
+      "notes",
+      "images",
+      "polished",
+      "STOP",
+      "studio",
+      "studio.json"
+    ],
+    "allow_phrases": [],
+    "banned": []
+  },
+  "llm": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "app_title": "novel_studio",
+    "app_url": "https://github.com/InfraOjisan/novel_studio",
+    "api_key_env": [
+      "NOVEL_PROVIDER_APIKEY",
+      "NOVEL_LLM_API_KEY",
+      "OPENROUTER_API_KEY",
+      "HERMES_CUSTOM_OPENROUTER_API_KEY"
+    ],
+    "model_env": "NOVEL_MODEL",
+    "model_env_roles": [],
+    "retries": 3,
+    "json_mode": true,
+    "idle_timeout_sec": 180,
+    "profiles": {
+      "writer": {
+        "model": "anthropic/claude-haiku-5.5",
+        "temperature": 0.8,
+        "max_tokens": 32000,
+        "reasoning_effort": "high",
+        "system": "あなたは日本語で書く小説家です。依頼文の指示と出力形式に厳密に従い、指定された成果物だけを返します。",
+        "deadline_sec": 420,
+        "fallback_models": [
+          "openai/gpt-6-luna-pro"
+        ]
+      },
+      "reviewer": {
+        "model": "openai/gpt-6-luna-pro",
+        "fallback_models": [
+          "anthropic/claude-haiku-5.5"
+        ],
+        "temperature": 0.2,
+        "max_tokens": 16000,
+        "reasoning_effort": "low",
+        "system": "あなたは厳格な小説編集者であり記録係です。依頼文の出力形式に厳密に従い、指定された成果物だけを返します。",
+        "deadline_sec": 240
+      },
+      "polisher": {
+        "model": "anthropic/claude-haiku-5.5",
+        "temperature": 0.75,
+        "max_tokens": 32000,
+        "reasoning_effort": "medium",
+        "system": "あなたは日本語の小説の文体を磨く名手です。筋・事実・台詞の中身は一切変えず、文章の色・リズム・五感の描写だけを豊かにします。指定された成果物だけを返します。",
+        "deadline_sec": 420,
+        "fallback_models": [
+          "openai/gpt-6-luna-pro"
+        ]
+      },
+      "premium": {
+        "model": "anthropic/claude-opus-5.5",
+        "temperature": 0.4,
+        "max_tokens": 32000,
+        "reasoning_effort": "medium",
+        "system": "あなたは日本語の小説の上位編集者です。全体の整合を取りながら、依頼された範囲だけを一度で直します。指定された成果物だけを返します。",
+        "deadline_sec": 900
+      }
+    },
+    "task_overrides": {
+      "design": {
+        "temperature": 0.7,
+        "reasoning_effort": "medium",
+        "deadline_sec": 900,
+        "max_tokens": 64000
+      },
+      "canon-review": {
+        "reasoning_effort": "medium"
+      }
+    },
+    "_comment_roles": "書く・照合するのは安いモデル（writer / reviewer）で何度でも。全体の整合を直す・校正は premium で一回だけ（rescue / proofread）。止めるかどうかは人。Grauwall_06 の実績からの既定値（2026-10-12）。"
+  },
+  "polisher_cmd": [
+    "python3",
+    "tools/call_llm.py",
+    "{packet}",
+    "polisher"
+  ],
+  "writer_cmd": [
+    "python3",
+    "tools/call_llm.py",
+    "{packet}",
+    "writer"
+  ],
+  "reviewer_cmd": [
+    "python3",
+    "tools/call_llm.py",
+    "{packet}",
+    "reviewer"
+  ],
+  "premium_cmd": [
+    "python3",
+    "tools/call_llm.py",
+    "{packet}",
+    "premium"
+  ],
+  "polish": {
+    "len_ratio_min": 0.9,
+    "len_ratio_max": 1.3,
+    "dialogue_ratio_min": 0.85,
+    "max_attempts": 3
+  },
+  "proofread": {
+    "protected_words": []
+  },
+  "call_env": {},
+  "publish": {
+    "studio": "AI小説制作スタジオ",
+    "author": "",
+    "rating_url": "",
+    "fallback_title": "無題",
+    "cover_image": "images/cover.jpg",
+    "credits": [],
+    "ai_disclosure": "本作の本文は生成AIが執筆し、人間が企画・監修しました。"
+  }
+}

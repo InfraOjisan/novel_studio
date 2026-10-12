@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>novel studio</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">novel <span>studio</span></div>
+  <label class="work-pick">作品
+    <select id="workSel"><option value="">— 選ぶ —</option></select>
+  </label>
+  <button class="ghost" id="newWorkBtn" type="button">新しい作品</button>
+  <div class="spacer"></div>
+  <div class="meter" id="meter" tabindex="0" aria-describedby="meterTip">
+    <span class="meter-label">これまでの費用</span>
+    <strong id="meterTotal">$0.0000</strong>
+    <div class="meter-tip" id="meterTip" role="tooltip"></div>
+  </div>
+  <div class="keystate" id="keyState"></div>
+</header>
+
+<div class="shell">
+  <main id="main" tabindex="-1">
+    <section id="empty" class="panel">
+      <h1>小説を一から書く</h1>
+      <p class="lede">テーマを入れて複数のモデルに企画を出させ、似た案と外れた案を見分け、選んだ案から執筆指示書（BRIEF）を作ります。確定（Fix）すると、設定書（CANON）・各章の執筆・審査・校正・EPUB まで、同じ画面で進みます。</p>
+      <p>上の「新しい作品」から始めるか、作品を選んでください。</p>
+    </section>
+    <section id="panel-theme" class="panel" hidden></section>
+    <section id="panel-propose" class="panel" hidden></section>
+    <section id="panel-classify" class="panel" hidden></section>
+    <section id="panel-brief" class="panel" hidden></section>
+    <section id="panel-fix" class="panel" hidden></section>
+    <section id="panel-canon" class="panel" hidden></section>
+    <section id="panel-write" class="panel" hidden></section>
+    <section id="panel-finish" class="panel" hidden></section>
+  </main>
+
+  <nav class="rail" aria-label="工程">
+    <ol id="rail">
+      <li data-stage="theme"><button type="button"><b>一</b>テーマ</button></li>
+      <li data-stage="propose"><button type="button"><b>二</b>提案</button></li>
+      <li data-stage="classify"><button type="button"><b>三</b>分類</button></li>
+      <li data-stage="brief"><button type="button"><b>四</b>BRIEF</button></li>
+      <li data-stage="fix"><button type="button"><b>五</b>確定</button></li>
+      <li data-stage="canon"><button type="button"><b>六</b>CANON</button></li>
+      <li data-stage="write"><button type="button"><b>七</b>執筆</button></li>
+      <li data-stage="finish"><button type="button"><b>八</b>仕上げ</button></li>
+    </ol>
+  </nav>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<dialog id="dlg"><form method="dialog" id="dlgForm"></form></dialog>
+<script src="app.js"></script>
+</body>
+</html>
