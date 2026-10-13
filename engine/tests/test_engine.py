@@ -191,5 +191,146 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(out, ["十一", "二十", "二十二", "True", "True"])
 
 
+class Wire(unittest.TestCase):
+    """窓口の違い（llm_wire）。OpenCode Go の実際の門（User-Agent・x-opencode-session）は 2026-10-13 に確かめたもの。"""
+
+    def setUp(self):
+        import llm_wire
+        self.w = llm_wire
+        os.environ.pop("NOVEL_LLM_PROTOCOLS", None)
+        os.environ.pop("NOVEL_LLM_PRICES", None)
+
+    def test_protocol_for(self):
+        go, zen, orr = "https://opencode.ai/zen/go/v1", "https://opencode.ai/zen/v1", "https://openrouter.ai/api/v1"
+        pf = self.w.protocol_for
+        self.assertEqual([pf(go, m) for m in ("claude-haiku-5-5", "gpt-6-luna", "mimo-v2.6-pro", "deepseek-v4.1-flash", "minimax-m3", "qwen3.7-plus")],
+                         ["messages", "responses", "chat", "chat", "messages", "messages"])
+        self.assertEqual([pf(zen, m) for m in ("claude-opus-5-5", "gpt-6-sol", "qwen3.8-max", "qwen3.8-flash", "kimi-k3")],
+                         ["messages", "responses", "chat", "messages", "chat"])
+        self.assertEqual(pf(orr, "anthropic/claude-haiku-5.5"), "chat")  # OpenRouter はいつも chat
+        self.assertEqual(pf(go, "kimi-k3", {"kimi-": "messages"}), "messages")  # config の llm.protocols
+        os.environ["NOVEL_LLM_PROTOCOLS"] = "gpt-:chat"
+        self.assertEqual(pf(go, "gpt-6-luna"), "chat")
+
+    def test_headers(self):
+        h = self.w.headers("k", "messages", session="s1")
+        self.assertFalse(h["User-Agent"].startswith("Python-urllib"))
+        self.assertEqual((h["x-opencode-session"], h["x-api-key"], h["anthropic-version"]), ("s1", "k", "2023-06-01"))
+        self.assertTrue(self.w.headers("k")["x-opencode-session"])  # 指定がなくても送る（OpenCode Go では必須）
+
+    def test_build_parse(self):
+        path, b = self.w.build("responses", "gpt-6-luna", "sys", "hi", 0.7, 100, "low", True)
+        self.assertEqual((path, b["instructions"], b["max_output_tokens"], b["text"]["format"]["type"]), ("/responses", "sys", 100, "json_object"))
+        path, b = self.w.build("messages", "claude-haiku-5-5", "sys", "hi", 1.5, 100)
+        self.assertEqual((path, b["system"], b["temperature"]), ("/messages", "sys", 1.0))
+        t, fin, u, _ = self.w.parse("responses", {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
+                                                  "output": [{"type": "message", "content": [{"type": "output_text", "text": "あ"}]}],
+                                                  "usage": {"input_tokens": 3, "output_tokens": 1}})
+        self.assertEqual((t, fin, u["prompt_tokens"]), ("あ", "length", 3))
+        t, fin, u, _ = self.w.parse("messages", {"content": [{"type": "thinking"}, {"type": "text", "text": "い"}], "stop_reason": "end_turn",
+                                                 "usage": {"input_tokens": 2, "output_tokens": 5}})
+        self.assertEqual((t, fin, u["completion_tokens"]), ("い", "stop", 5))
+
+    def test_estimate_cost(self):
+        self.assertAlmostEqual(self.w.estimate_cost("minimax-m3", {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}), 1.5)
+        self.assertIsNone(self.w.estimate_cost("gpt-6-luna", {"prompt_tokens": 10}))
+        os.environ["NOVEL_LLM_PRICES"] = "gpt-6-luna=1/10"
+        self.assertAlmostEqual(self.w.estimate_cost("gpt-6-luna", {"prompt_tokens": 1_000_000, "completion_tokens": 100_000}), 2.0)
+
+
+class OpenCodeEndToEnd(unittest.TestCase):
+    """偽の OpenCode Go（/zen/go/v1）で、studio と engine の両方が窓口を使い分けて通ること。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.port = free_port()
+        cls.mock = subprocess.Popen([PY, str(REPO / "studio" / "devtools" / "mock_openrouter.py"), "--port", str(cls.port)],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.8)
+        cls.base = f"http://127.0.0.1:{cls.port}/zen/go/v1"
+        cls.tmp = Path(tempfile.mkdtemp(prefix="novel-oc-"))
+        cls.env = dict(os.environ, NOVEL_LLM_BASE_URL=cls.base, NOVEL_PROVIDER_APIKEY="mock")
+        cls.env.pop("NOVEL_LLM_PROTOCOLS", None)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.mock.terminate()
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_library_user_agent_is_refused(self):
+        import urllib.error
+        import urllib.request
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(self.base + "/models", timeout=10)
+        self.assertEqual(cm.exception.code, 403)
+        self.assertIn(b"1010", cm.exception.read())
+
+    def test_studio_chat(self):
+        code = ("import sys, json; sys.path.insert(0, 'studio'); import llm\n"
+                "out = []\n"
+                "for m in ['claude-haiku-5-5', 'gpt-6-luna', 'deepseek-v4-flash', 'mockwire-odd']:\n"
+                "    t, r = llm.chat(m, '<!-- STUDIO: propose -->\\nテーマ', session='novel-studio-t')\n"
+                "    out.append([m, r['protocol'], r['price'], bool(llm.extract_json(t))])\n"
+                "print(json.dumps(out))")
+        r = subprocess.run([PY, "-c", code], cwd=REPO, capture_output=True, text=True, env=self.env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads(r.stdout)
+        self.assertEqual([g[1] for g in got], ["messages", "responses", "chat", "messages"])  # mockwire-odd は chat → messages に切り替わる
+        self.assertEqual([g[2] for g in got], ["unknown", "unknown", "estimated", "unknown"])
+        self.assertTrue(all(g[3] for g in got))
+
+    def test_engine_until_canon_hold(self):
+        work = self.tmp / "oc"
+        r = scaffold.create(sample_brief(4), work, roles={"writer": "claude-haiku-5-5", "reviewer": "gpt-6-luna", "premium": "minimax-m3"})
+        self.assertTrue(r["ok"], r)
+        run = subprocess.run([PY, "tools/novelctl.py", "run"], cwd=work, capture_output=True, text=True, env=self.env,
+                             stdin=subprocess.DEVNULL, timeout=300)
+        self.assertEqual(run.returncode, 2, run.stdout[-800:] + run.stderr[-800:])  # canon_hold で止まる
+        recs = [json.loads(x) for x in (work / "logs" / "usage.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(recs and all(x["ok"] for x in recs))
+        self.assertEqual({x["model"] for x in recs}, {"claude-haiku-5-5", "gpt-6-luna"})
+        p = subprocess.run([PY, "tools/call_llm.py", "--ping", "premium"], cwd=work, capture_output=True, text=True, env=self.env, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        last = json.loads((work / "logs" / "usage.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(last["model"], "minimax-m3")
+        self.assertTrue(last.get("est") and last["cost"] > 0)  # OpenCode は費用を返さない → 公開価格で見積もる
+
+
+class Derive(unittest.TestCase):
+    """テーマを直して、新しい作品フォルダで提案し直す（v1.1.1）。名前は必ず変える＝元の作品は上書きされない。"""
+
+    def setUp(self):
+        import core
+        self.core = core
+        self.saved = core.WORKS
+        core.WORKS = Path(tempfile.mkdtemp(prefix="novel-derive-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.core.WORKS, ignore_errors=True)
+        self.core.WORKS = self.saved
+
+    def test_derive(self):
+        c = self.core
+        c.create_work("moon", {"genre": "SF", "theme": "氷の月"})
+        before = (c.WORKS / "moon" / "studio.json").read_bytes()
+        self.assertEqual(c.suggest_slug("moon"), "moon-2")
+        for bad in ("moon", "", "../x"):
+            with self.assertRaises(c.StudioError):
+                c.derive_work("moon", bad, {"genre": "SF", "theme": "氷の月の潮"})
+        st = c.derive_work("moon", "moon-2", {"genre": "SF", "theme": "氷の月の潮"})
+        self.assertEqual(st["derived_from"]["slug"], "moon")
+        self.assertEqual(st["derived_from"]["changed"], ["テーマ・題材"])
+        self.assertEqual((st["rounds"], st["proposals"]), ([], {}))
+        with self.assertRaises(c.StudioError):
+            c.derive_work("moon", "moon-2", {"theme": "別"})  # もうある名前には作らない
+        self.assertEqual((c.WORKS / "moon" / "studio.json").read_bytes(), before)  # 元の作品は一切変わらない
+        self.assertEqual(c.suggest_slug("moon-2"), "moon-3")
+        self.assertEqual([k["slug"] for k in c.derived_children("moon")], ["moon-2"])
+        (c.WORKS / "stray").mkdir()
+        (c.WORKS / "stray" / "memo.txt").write_text("x")
+        with self.assertRaises(c.StudioError):
+            c.create_work("stray", {})  # 中身のあるフォルダには作らない
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@ novel_studio v1.0 の道具は、すべて「JSON を入れて JSON を出す」
 | `new <slug> --theme F` | theme.json | 状態の要約 | `works/<slug>/` を作る | なし | 許可 |
 | `show <slug> [--brief]` | — | `stage` `proposals` `classify` `briefs` `fixed` `costs` | なし | なし | 許可 |
 | `theme <slug> --theme F` | theme.json | 状態の要約 | 提案・分類・BRIEF を history に退避して最初から | なし | **確認** |
+| `derive <slug> <new-slug> [--theme F]` | theme.json | 状態の要約（`derived_from`） | 新しい `works/<new-slug>/` を作る（元の作品は変えない。名前は必ず別） | なし | 許可 |
 | `propose <slug> --models a,b --n 2 [--mode new/resubmit/rolling] [--instruction T]` | — | `round` `proposals[]` `errors{}` | 案を足す | 各モデル1〜2回 | 許可 |
 | `edit <slug> <pid> --fields F` | 欄の JSON | `pid`（新しい案） | 案を足す | なし | 確認 |
 | `revise <slug> <pid> --model m --instruction T` | — | `pid` | 案を足す | 1〜2回 | 許可 |

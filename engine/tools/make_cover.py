@@ -105,9 +105,10 @@ def _key_and_base():
 
 
 def _post(url, key, body, timeout=300):
-    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST", headers={
-        "Content-Type": "application/json", "Authorization": f"Bearer {key}",
-        "HTTP-Referer": "https://github.com/InfraOjisan/novel_studio", "X-Title": "novel_studio cover"})
+    sys.path.insert(0, str(ROOT / "tools"))
+    import llm_wire
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST",
+                                 headers=llm_wire.headers(key, "chat", title="novel_studio cover"))
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 

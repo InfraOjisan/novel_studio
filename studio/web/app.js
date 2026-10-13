@@ -130,13 +130,15 @@ function renderRail() {
 
 function renderMeter() {
   const c = S.snap && S.snap.costs;
-  $("#meterTotal").textContent = usd(c ? c.total_usd : 0);
+  $("#meterTotal").textContent = (c && c.estimated ? "≈" : "") + usd(c ? c.total_usd : 0) + (c && c.unpriced ? "+?" : "");
   if (!c) { $("#meterTip").textContent = "作品を選ぶと、工程ごとの費用が出ます。"; return; }
   const lines = ["企画（studio）"];
   for (const [k, v] of Object.entries(c.studio)) lines.push(`  ${k.padEnd(14)} ${usd(v.usd)}  ${v.calls}回`);
   lines.push(`  小計 ${usd(c.studio_usd)}`, "", "執筆（engine）");
   for (const [k, v] of Object.entries(c.engine)) lines.push(`  ${k.padEnd(14)} ${usd(v.usd)}  ${v.calls}回`);
   lines.push(`  小計 ${usd(c.engine_usd)}`);
+  if (c.estimated) lines.push("", `うち ${c.estimated}回は公開価格からの見積もり（窓口が費用を返さない）`);
+  if (c.unpriced) lines.push(`価格が分からず $0 で数えた呼び出し ${c.unpriced}回（NOVEL_LLM_PRICES で価格を足せます）`);
   if (S.snap.fixed && S.snap.fixed.budget) lines.push("", `予算 $${S.snap.fixed.budget}`);
   $("#meterTip").textContent = lines.join("\n");
 }
@@ -200,15 +202,41 @@ function renderTheme() {
     return;
   }
   const fixed = !!S.snap.fixed;
-  el.innerHTML = `<header><h1>テーマ</h1><span class="muted">版 ${S.snap.theme_version}${fixed ? "（確定済み。変更できません）" : ""}</span></header>
+  const df = S.snap.derived_from;
+  const kids = S.snap.derived || [];
+  el.innerHTML = `<header><h1>テーマ</h1><span class="muted">版 ${S.snap.theme_version}${fixed ? "（確定済み）" : ""}</span></header>
+    ${df ? `<p class="muted">《<a href="#" data-goto="${h(df.slug)}">${h(df.slug)}</a>》のテーマ（版${df.theme_version}）から派生。変えた欄：${h((df.changed || []).join("・") || "なし")}</p>` : ""}
     ${themeForm(S.snap.theme)}
-    <div class="row"><button class="ghost" id="retheme" type="button" ${fixed ? "disabled" : ""}>テーマを変えて、最初からやり直す</button>
-    <span class="muted">いまの提案・分類・BRIEF は作品フォルダの studio/history/ に残ります。</span></div>`;
+    <section class="derive">
+      <h2>テーマを直して、提案を頼み直す</h2>
+      <p class="muted">上のテーマを直してから押してください。<b>新しい作品フォルダ</b>で提案から始めます。いまの作品（${h(S.slug)}）の提案・分類・BRIEF・本文は一切変わりません。</p>
+      <div class="row"><label class="f" style="max-width:320px">新しい作品フォルダの名前（必須・英数字・-・_）<input type="text" id="newSlug" value="${h(S.snap.suggest_slug || "")}" autocomplete="off"></label></div>
+      <div class="row"><button class="act" id="deriveBtn" type="button">直したテーマで、新しい作品として提案へ</button></div>
+      ${kids.length ? `<p class="muted">この作品から派生した作品：${kids.map((k) => `<a href="#" data-goto="${h(k.slug)}">${h(k.slug)}</a>`).join("、")}</p>` : ""}
+    </section>
+    <details class="retheme"><summary>この作品フォルダのまま、テーマを変えて最初からやり直す</summary>
+      <div class="row"><button class="ghost" id="retheme" type="button" ${fixed ? "disabled" : ""}>テーマを変えて、最初からやり直す</button>
+      <span class="muted">${fixed ? "確定済みの作品はできません。上の「新しい作品として」を使ってください。" : "いまの提案・分類・BRIEF は作品フォルダの studio/history/ に退避されます。"}</span></div>
+    </details>`;
+  el.querySelectorAll("[data-goto]").forEach((a) => a.onclick = (ev) => { ev.preventDefault(); gotoWork(a.dataset.goto); });
+  $("#deriveBtn").onclick = () => guard(async () => {
+    const ns = $("#newSlug").value.trim();
+    if (!ns) { toast("新しい作品フォルダの名前を入れてください"); $("#newSlug").focus(); return; }
+    if (ns === S.slug) { toast("いまの作品とは別の名前にしてください"); $("#newSlug").focus(); return; }
+    const d = await api("POST", `/api/works/${S.slug}/derive`, { new_slug: ns, theme: readThemeForm(el.querySelector(".form")) });
+    S.slug = d.slug; S.view = "propose"; S.briefV = null; S.chapterView = null; localStore("slug", S.slug);
+    await loadWorks(S.slug); await refresh(); toast(`新しい作品 ${d.slug} を作りました。提案を頼んでください。`);
+  });
   $("#retheme").onclick = () => guard(async () => {
-    if (!confirm("テーマを変えると、提案からやり直しになります。よろしいですか。")) return;
-    await api("POST", `/api/works/${S.slug}/theme`, { theme: readThemeForm(el) });
+    if (!confirm("テーマを変えると、この作品は提案からやり直しになります。よろしいですか。")) return;
+    await api("POST", `/api/works/${S.slug}/theme`, { theme: readThemeForm(el.querySelector(".form")) });
     S.view = "propose"; await refresh(); toast("テーマを変えました。提案からやり直します。");
   });
+}
+
+async function gotoWork(slug) {
+  S.slug = slug; S.view = null; S.briefV = null; S.chapterView = null; localStore("slug", slug);
+  $("#workSel").value = slug; await refresh();
 }
 
 /* ---------------------------------------------------------------- 二 提案 */
@@ -528,7 +556,7 @@ function engineBox() {
   if (e.error) return `<div class="alarm"><h3>エンジンの状態を読めません</h3><p>${h(e.error)}</p></div>`;
   let s = "";
   if (S.snap.tools_outdated) {
-    s += `<div class="notice">この作品の道具（tools/）は古い版です。上位モデルの手直しでモデルを選ぶ・指示を足す、表紙を作る、には道具を最新にしてください（プロンプト・BRIEF・CANON・本文は変わりません）。
+    s += `<div class="notice">この作品の道具（tools/）は古い版です。上位モデルの手直しでモデルを選ぶ・指示を足す、表紙を作る、OpenCode のモデルで書く、には道具を最新にしてください（プロンプト・BRIEF・CANON・本文は変わりません）。
       <button class="ghost small" data-e="upgrade" type="button">道具を最新にする</button></div>`;
   }
   if (e.running) {

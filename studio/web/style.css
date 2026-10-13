@@ -210,3 +210,8 @@ dialog::backdrop { background: rgba(20, 24, 22, .45); }
 /* 上位モデルの手直しの履歴 */
 ol.hist { margin: 4px 0 10px; padding-left: 1.4em; font-size: 13.5px; }
 ol.hist li { margin: 2px 0; }
+
+/* テーマを直して新しい作品で出し直す（v1.1.1） */
+.derive { border-top: 1px solid var(--rule); margin-top: 18px; padding-top: 6px; }
+details.retheme { margin-top: 18px; }
+details.retheme summary { cursor: pointer; color: var(--ink-2); }
