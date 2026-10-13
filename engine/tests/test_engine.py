@@ -86,7 +86,7 @@ class EndToEnd(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.port = free_port()
-        env = dict(os.environ, MOCK_FAIL_CHAPTER="2")
+        env = dict(os.environ, MOCK_FAIL_CHAPTER="2", MOCK_RESCUE_FAIL_MODEL="anthropic/claude-opus-5.5")
         cls.mock = subprocess.Popen([PY, str(REPO / "studio" / "devtools" / "mock_openrouter.py"), "--port", str(cls.port)],
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
         time.sleep(0.8)
@@ -116,12 +116,24 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("承認", self.ctl(work, "approve-canon", env=dict(self.env, NOVEL_STUDIO_APPROVE=fp)).stdout)
         out = self.ctl(work, "run")
         self.assertIn("CHAPTER_EXHAUSTED", out.stdout)  # 第2章は偽モデルの審査で落ち続ける
+        # 指定の上位モデル（opus）で直しても通らない → 別のモデルを選んで直す（v1.1）
         self.assertEqual(self.ctl(work, "rescue", "chapter", "2").returncode, 0)
+        out = self.ctl(work, "run")
+        self.assertIn("CHAPTER_EXHAUSTED", out.stdout)
+        self.assertIn("--model", out.stdout)
+        self.assertEqual(self.ctl(work, "rescue", "chapter", "2", "--model", "openai/gpt-6-luna-pro", "--note", "棚の番号は表どおり").returncode, 0)
+        self.assertIn("棚の番号は表どおり", (work / "work" / "rescue-chapter_ch02.packet.md").read_text(encoding="utf-8"))
+        self.assertNotEqual(self.ctl(work, "rescue", "chapter", "2", "--model", "bad model!").returncode, 0)
         out = self.ctl(work, "run")
         self.assertEqual(out.returncode, 3, out.stdout[-800:])
         st = json.loads(self.ctl(work, "status", "--json").stdout)
         self.assertEqual(st["phase"], "done")
-        self.assertEqual(st["rescues"], 1)
+        self.assertEqual(st["rescues"], 2)
+        hist = next(c for c in st["chapters"] if c["n"] == 2)["rescues"]
+        self.assertEqual([h["model"] for h in hist], ["anthropic/claude-opus-5.5", "openai/gpt-6-luna-pro"])
+        self.assertTrue(hist[0]["result"].startswith("審査で不合格") and hist[1]["result"] == "合格")
+        used = [json.loads(x)["model"] for x in (work / "logs" / "usage.jsonl").read_text(encoding="utf-8").splitlines() if '"premium"' in x]
+        self.assertIn("openai/gpt-6-luna-pro", used)
         self.assertGreater(st["usage"]["total_usd"], 0)
         self.assertIn("premium", st["usage"]["by_role"])
         self.assertEqual(self.ctl(work, "proofread").returncode, 0)
@@ -133,6 +145,40 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(list((work / "output").glob("*.epub")))
         g = subprocess.run([PY, "tools/guard.py", "check"], cwd=work, capture_output=True, text=True)
         self.assertEqual(g.returncode, 0, g.stdout)
+
+    def test_cover(self):
+        """表紙：画像生成（偽モデル）→ 文字組み → EPUB に表紙と著者名が入る。Chrome が無い環境では絵だけの表紙になる。"""
+        import struct
+        import zipfile
+        work = self.tmp / "wc"
+        self.assertTrue(scaffold.create(sample_brief(3), work)["ok"])
+        self.ctl(work, "run")
+        import hashlib
+        fp = hashlib.sha256((work / "canon" / "CANON.md").read_bytes()).hexdigest()[:8]
+        self.ctl(work, "approve-canon", env=dict(self.env, NOVEL_STUDIO_APPROVE=fp))
+        self.ctl(work, "run")
+        r = self.ctl(work, "cover", "--model", "black-forest-labs/flux.2-pro", "--style", "illust", "--motif", "霧の鐘楼",
+                     "--title-dir", "vertical", "--font", "mincho", "--author", "テスト著者")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        meta = json.loads((work / "images" / "cover.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["author"], "テスト著者")
+        self.assertTrue((work / "images" / meta["cover"]).exists())
+        if meta["cover"] == "cover.png" and not meta.get("note"):
+            w, h = struct.unpack(">II", (work / "images" / "cover.png").read_bytes()[16:24])
+            self.assertEqual((w, h), (1600, 2560))
+        usage = [json.loads(x) for x in (work / "logs" / "usage.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(any(u["role"] == "cover" and u["cost"] for u in usage))
+        # 文字だけ組み直す（モデルを呼ばない）
+        n_before = len(usage)
+        self.assertEqual(self.ctl(work, "cover", "--reuse-art", "--title-dir", "horizontal", "--font", "casual", "--author", "別名").returncode, 0)
+        self.assertEqual(len((work / "logs" / "usage.jsonl").read_text(encoding="utf-8").splitlines()), n_before)
+        self.ctl(work, "epub")
+        epub = next((work / "output").glob("*.epub"))
+        opf = zipfile.ZipFile(epub).read("OEBPS/content.opf").decode("utf-8")
+        self.assertIn("別名", opf)
+        self.assertIn('properties="cover-image"', opf)
+        g = subprocess.run([PY, "tools/guard.py", "check"], cwd=work, capture_output=True, text=True)
+        self.assertNotEqual(g.returncode, 2, g.stdout)  # 表紙は保護ファイルを触らない
 
     def test_chapter_numbers_over_twenty(self):
         work = self.tmp / "w22"

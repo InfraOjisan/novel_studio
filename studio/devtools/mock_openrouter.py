@@ -10,6 +10,8 @@
 環境変数:
   MOCK_FAIL_CANON_REVIEW=N   CANON 審査を最初の N 回だけ不合格にする（設計のやり直しの経路を通すため）
   MOCK_FAIL_CHAPTER=K        第K章の審査を毎回不合格にする（CHAPTER_EXHAUSTED → rescue の経路を通すため。rescue 後は合格）
+  MOCK_FAIL_FINAL=K          最終審査で第K章に重大な指摘を出し続ける（第K章を上位モデルで直すまで）
+  MOCK_RESCUE_FAIL_MODEL=M   このモデル（カンマ区切り）で rescue した章は、審査に通らないままにする（別のモデルを選ぶ経路を通すため）
   MOCK_DELAY=秒              1回の応答を遅らせる（進み具合の表示を見るため）
 
 ハーネスの試験（harness/exams）でも、費用をかけずに進行役の振る舞いだけを見るのに使える。
@@ -34,6 +36,21 @@ MODELS = [
     ("moonshotai/kimi-k3", 0.5, 2.0), ("z-ai/glm-5.3", 0.4, 1.6), ("qwen/qwen3.8-flash", 0.05, 0.2),
 ]
 PRICE = {m: (i / 1e6, o / 1e6) for m, i, o in MODELS}
+IMAGE_MODELS = [("google/gemini-2.5-flash-image", 0.039), ("openai/gpt-image-2", 0.05), ("black-forest-labs/flux.2-pro", 0.04)]
+
+
+def fake_png(w=400, h=640, seed="x"):
+    """標準ライブラリだけで、グラデーションの PNG を作る（偽の画像生成）。"""
+    import struct
+    import zlib
+    hsh = int(hashlib.md5(seed.encode()).hexdigest()[:6], 16)
+    r0, g0, b0 = (hsh >> 16) & 255, (hsh >> 8) & 255, hsh & 255
+    raw = b"".join(b"\x00" + bytes(v for x in range(w) for v in (
+        (r0 * (h - y) + 30 * y) // h, (g0 * (h - y) + 40 * y) // h, (b0 * (h - y) + 70 * y) // h)) for y in range(h))
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b"")
 
 WORDS = ["霧", "灯", "石段", "川面", "鈴", "外套", "指先", "帳面", "窓", "足音", "古い地図", "湯気", "鍵", "蝋燭", "砂", "風見",
          "階段", "手紙", "硝子", "縄", "舟", "鐘楼", "棚", "籠", "影", "火床", "泥", "袖", "羽根", "皿"]
@@ -75,7 +92,7 @@ def slot_events(text, header):
     return ev
 
 
-def engine_answer(task, ch, text):
+def engine_answer(task, ch, text, model=""):
     if task == "design":
         prev = section(text, "前回のCANON")
         if prev:
@@ -98,8 +115,9 @@ def engine_answer(task, ch, text):
         return json.dumps({"pass": True, "issues": [{"severity": "low", "item": 12, "detail": "不変条件の言い回しが硬い（偽モデル）", "fix": "任意"}]}, ensure_ascii=False)
     if task in ("write", "rescue-chapter", "polish"):
         if task == "rescue-chapter":
-            with LOCK:
-                STATE["rescued"].add(ch)
+            if model not in os.environ.get("MOCK_RESCUE_FAIL_MODEL", "").split(","):  # このモデルの手直しは審査に通らない
+                with LOCK:
+                    STATE["rescued"].add(ch)
             return section(text, "いまの原稿")
         if task == "polish":
             return section(text, f"磨く原稿（第{ch}章）")
@@ -131,6 +149,10 @@ def engine_answer(task, ch, text):
                 out.append(f"{f}: 第{ch}章の{f}（偽モデル）")
         return "\n".join(out)
     if task == "final":
+        ff = os.environ.get("MOCK_FAIL_FINAL")
+        if ff and int(ff) not in STATE["rescued"]:
+            return json.dumps({"pass": False, "issues": [{"severity": "high", "chapter": int(ff), "detail": "伏線F1の回収が駆け足で、設置の場面と結びついていない（偽モデル）", "fix": "設置の場面の小道具を回収の場面で呼び戻す"}],
+                               "carry_over": [], "summary": "最終章が苦しい（偽モデル）"}, ensure_ascii=False)
         return json.dumps({"pass": True, "issues": [], "carry_over": [], "summary": "偽モデルの講評：全章そろっている。"}, ensure_ascii=False)
     if task == "rescue-canon":
         return section(text, "いまのCANON")
@@ -228,6 +250,9 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        if self.path.rstrip("/").endswith("/images/models") or "output_modalities=image" in self.path:
+            return self._json(200, {"data": [{"id": m, "name": m, "architecture": {"input_modalities": ["text"], "output_modalities": ["image"]},
+                                              "pricing": {"image": str(p)}} for m, p in IMAGE_MODELS]})
         if self.path.rstrip("/").endswith("/models"):
             return self._json(200, {"data": [{"id": m, "name": m, "context_length": 200000,
                                               "pricing": {"prompt": f"{i / 1e6:.10f}", "completion": f"{o / 1e6:.10f}"}} for m, i, o in MODELS]})
@@ -235,6 +260,15 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if self.path.rstrip("/").endswith("/images"):
+            if body.get("model") not in dict(IMAGE_MODELS):
+                return self._json(404, {"error": {"message": "mock: not an image model"}})
+            if body.get("aspect_ratio") == "2:3" and body.get("model") == "black-forest-labs/flux.2-pro":
+                return self._json(400, {"error": {"message": "mock: aspect ratio not supported"}})  # 縦横比の切り替えを通すため
+            time.sleep(float(os.environ.get("MOCK_DELAY", "0")))
+            png = fake_png(seed=body.get("prompt", "") + body["model"])
+            return self._json(200, {"created": int(time.time()), "data": [{"b64_json": __import__("base64").b64encode(png).decode(), "media_type": "image/png"}],
+                                    "usage": {"cost": dict(IMAGE_MODELS)[body["model"]]}})
         text = body["messages"][-1]["content"]
         model = (body.get("models") or [body.get("model")])[0]
         if model == "mock/broken":
@@ -242,7 +276,7 @@ class H(BaseHTTPRequestHandler):
         m = re.match(r"<!-- TASK: (\S+)(?: CH=(\d+))?", text)
         s = re.search(r"<!-- STUDIO: (\S+) -->", text)
         if m:
-            out = engine_answer(m.group(1), int(m.group(2) or 0), text)
+            out = engine_answer(m.group(1), int(m.group(2) or 0), text, model)
         elif s:
             out = studio_answer(s.group(1), text, model)
         else:

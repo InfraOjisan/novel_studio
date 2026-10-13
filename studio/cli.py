@@ -19,7 +19,11 @@
   python3 studio/cli.py brief-show <slug> <V> [--markdown]
   python3 studio/cli.py fix <slug> <V> [--roles roles.json] [--budget 3]
   python3 studio/cli.py engine <slug> <action> [--ch N] [--feedback "..."] [--flags retry,accept] [--chapters 1,2]
-        action = start | step | redesign | rescue_canon | rescue_chapter | resolve | reset_chapter | polish | proofread | assemble | epub | apply_proofread
+        rescue_canon / rescue_chapter は [--model M]（この一回だけ別のモデルで）と [--note "指示"] も取る
+        action = start | step | redesign | rescue_canon | rescue_chapter | resolve | reset_chapter | polish | proofread | assemble | epub | apply_proofread | cover
+  python3 studio/cli.py engine <slug> cover [--model M|none] [--style simple|illust|photo] [--motif "..."]
+        [--title-dir vertical|horizontal] [--font mincho|gothic|casual] [--author "..."] [--reuse-art]
+  python3 studio/cli.py image-models                         画像生成モデルの一覧
   python3 studio/cli.py costs <slug>
 
 承認（approve-canon）は CLI にはありません。人が画面か端末で行います。
@@ -87,6 +91,13 @@ def main(argv):
     ap.add_argument("--flags", default="")
     ap.add_argument("--chapters", default="")
     ap.add_argument("--ch", type=int)
+    ap.add_argument("--style")
+    ap.add_argument("--motif", default="")
+    ap.add_argument("--title-dir", dest="title_dir")
+    ap.add_argument("--font")
+    ap.add_argument("--author", default="")
+    ap.add_argument("--reuse-art", dest="reuse_art", action="store_true")
+    ap.add_argument("--note", default="")
     a = ap.parse_args(argv)
     A = a.args
     try:
@@ -133,13 +144,18 @@ def main(argv):
             if A[1] in ("rescue_chapter", "reset_chapter") and not a.ch:
                 return out({"error": "--ch（章番号）が必要です"}, 1)
             args = {"n": a.ch, "feedback": a.feedback or "", "flags": [x for x in a.flags.split(",") if x],
-                    "chapters": [int(x) for x in a.chapters.split(",") if x]}
+                    "chapters": [int(x) for x in a.chapters.split(",") if x],
+                    "model": a.model, "style": a.style, "motif": a.motif, "title_dir": a.title_dir, "font": a.font,
+                    "author": a.author, "reuse_art": a.reuse_art, "note": a.note}
             r = core.engine_action(A[0], A[1], args)
             st = core.engine_status(A[0])
             return out({**r, "status": {k: st.get(k) for k in ("phase", "current", "escalation", "next", "running", "usage")}},
                        0 if r["rc"] in (0, 3) else 2)
         if a.cmd == "status":
             return out(core.engine_status(A[0]))
+        if a.cmd == "image-models":
+            import llm
+            return out({"models": llm.image_models()})
         if a.cmd == "costs":
             return out(core.costs(A[0]))
         if a.cmd in ("approve", "approve-canon"):

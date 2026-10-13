@@ -49,11 +49,11 @@ python3 tools/guard.py check
 | コード | 意味 | 進行役の対応 | 人の選択肢 |
 |---|---|---|---|
 | `DESIGN_EXHAUSTED` | CANON の設計が規定回数で通らない | 止まって報告 | `rescue canon`（上位モデルで一度だけ全体修正）／`redesign --feedback "..."`／自分で直して `approve-canon` |
-| `CHAPTER_EXHAUSTED` | 章が3稿で合格しない | 止まって報告（`work/chNN_feedback.md` を写す） | `rescue chapter N`／`resolve --retry`／`resolve --accept` |
+| `CHAPTER_EXHAUSTED` | 章が3稿で合格しない | 止まって報告（`work/chNN_feedback.md` を写す） | `rescue chapter N [--model M] [--note 指示]`（上位モデルで直らなかったら別のモデルで）／`resolve --retry`／`resolve --accept` |
 | `LEDGER_FAILED` | 章の記録が書式を満たさない | 止まって報告 | `work/chNN_ledger_a*.out` を見て台帳に手で足し `resolve --ledger-done` |
 | `CANON_MODIFIED` | ロック後に CANON が変わった | 止まって報告 | 誰が変えたかを確かめ、正しければ `resolve --relock` |
 | `GUARD_STOP` | STOP があるか、保護ファイルが変わった | 止まって報告 | 原因を確かめて元に戻す |
-| `FINAL_REVIEW_FAILED` | 最終審査で重大指摘 | `output/final_report.md` の指摘を写して報告 | `reset-chapter N`／`resolve --done` |
+| `FINAL_REVIEW_FAILED` | 最終審査で重大指摘 | `output/final_report.md` の指摘を写して報告 | `rescue chapter N [--model M] [--note 指示]`（最終審査の指摘を修正指示に）／`reset-chapter N`／`resolve --done` |
 | `BUDGET_EXCEEDED` | 費用が `budget_usd` に達した | 止まって報告 | 予算を見直す |
 | `CALL_FAILED` / `CALL_TIMEOUT` | API の不調・キー・モデル名 | `--ping` で確かめ、結果を報告 | キー・モデル名を直して `resolve` |
 
@@ -66,7 +66,9 @@ python3 tools/novelctl.py polish             # 文体仕上げ（polisher）。p
 python3 tools/novelctl.py proofread          # 上位モデルが校正案を output/proofread_edits.json に出す（原稿は変えない）
 #   人が enabled を確かめる（studio では一覧のチェックで）
 python3 tools/proofread_apply.py             # 校正案を当てて output/final_proofread.md
-python3 tools/novelctl.py epub --proofread   # 縦書き EPUB
+python3 tools/novelctl.py cover --model <画像生成モデル|none> --style simple|illust|photo --motif "..." \
+    --title-dir vertical|horizontal --font mincho|gothic|casual --author "..."   # 表紙（images/cover.png）。費用がかかるので人の指示で
+python3 tools/novelctl.py epub --proofread   # 縦書き EPUB（表紙と著者名は images/cover.json から入る）
 ```
 
 ## 4. 人への報告（進行役が notes/REPORT.md に書く）

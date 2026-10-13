@@ -89,6 +89,8 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, raw=f.read_bytes(), ctype=(mimetypes.guess_type(str(f))[0] or "text/plain") + "; charset=utf-8")
             if parts[1:] == ["works"]:
                 return self._send(200, {"works": core.list_works(), "has_key": bool(llm.find_key()), "base_url": llm.base_url()})
+            if parts[1:] == ["image-models"]:
+                return self._send(200, {"models": llm.image_models(refresh=q.get("refresh") == "1"), "settings": core.settings()})
             if parts[1:] == ["models"]:
                 return self._send(200, {"models": llm.models(refresh=q.get("refresh") == "1"), "settings": core.settings()})
             if parts[1] == "jobs" and len(parts) == 3:
@@ -104,6 +106,8 @@ class H(BaseHTTPRequestHandler):
                     t = core.read_file(slug, q.get("path", ""))
                     if t is None:  # まだ無いのは異常ではない（画面が毎回確かめる）
                         return self._send(200, {"path": q.get("path"), "text": None})
+                    if isinstance(t, Path) and t.suffix != ".epub":
+                        return self._send(200, raw=t.read_bytes(), ctype=mimetypes.guess_type(t.name)[0] or "image/png")
                     if isinstance(t, Path):
                         return self._send(200, raw=t.read_bytes(), ctype="application/epub+zip",
                                           headers={"Content-Disposition": f"attachment; filename*=UTF-8''{urllib.parse.quote(t.name)}"})
@@ -157,7 +161,7 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, core.set_edits(slug, b["enabled"]))
             if act == "engine":
                 a = b.get("action")
-                if a in ("rescue_canon", "rescue_chapter", "proofread"):
+                if a in ("rescue_canon", "rescue_chapter", "proofread", "cover"):
                     return self._send(200, {"job": run_job(slug, a, core.engine_action, slug, a, b)})
                 return self._send(200, core.engine_action(slug, a, b))
             return self._send(404, {"error": "not found"})

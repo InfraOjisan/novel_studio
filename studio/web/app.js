@@ -527,6 +527,10 @@ function engineBox() {
   const e = S.snap.engine || {};
   if (e.error) return `<div class="alarm"><h3>エンジンの状態を読めません</h3><p>${h(e.error)}</p></div>`;
   let s = "";
+  if (S.snap.tools_outdated) {
+    s += `<div class="notice">この作品の道具（tools/）は古い版です。上位モデルの手直しでモデルを選ぶ・指示を足す、表紙を作る、には道具を最新にしてください（プロンプト・BRIEF・CANON・本文は変わりません）。
+      <button class="ghost small" data-e="upgrade" type="button">道具を最新にする</button></div>`;
+  }
   if (e.running) {
     const f = e.inflight;
     s += `<p class="busy">執筆エンジンが動いています${f ? `（${h(f.task)}・試行${f.attempt}・推論${f.reasoning_chars}字・本文${f.content_chars}字）` : ""}。画面を閉じても止まりません。</p>`;
@@ -535,29 +539,75 @@ function engineBox() {
     const x = e.escalation;
     const n = x.chapter;
     const opts = {
-      DESIGN_EXHAUSTED: `<button class="act" data-e="rescue_canon" type="button">上位モデルで CANON 全体を一度だけ直す</button><button class="ghost" data-e="redesign" type="button">指示を足して設計をやり直す</button><button class="ghost" data-e="approve_view" type="button">CANON を読んで、このまま承認する</button>`,
-      CHAPTER_EXHAUSTED: `<button class="act" data-e="rescue_chapter" data-n="${n}" type="button" ${S.snap.engine.chapters.find((c) => c.n === n && c.rescued) ? "disabled" : ""}>上位モデルで第${n}章の指摘箇所を直す</button><button class="ghost" data-e="resolve" data-f="retry" type="button">書き手にもう3稿書かせる</button><button class="ghost" data-e="resolve" data-f="accept" type="button">原稿のまま採用する</button>`,
-      FINAL_REVIEW_FAILED: `<button class="ghost" data-e="resolve" data-f="done" type="button">原稿のまま完成とする</button>`,
+      DESIGN_EXHAUSTED: `<button class="act" data-e="rescue_canon" type="button">${(e.canon_rescues || []).length ? "別のモデルで CANON 全体を直す" : "上位モデルで CANON 全体を一度だけ直す"}</button><button class="ghost" data-e="redesign" type="button">指示を足して設計をやり直す</button><button class="ghost" data-e="approve_view" type="button">CANON を読んで、このまま承認する</button>`,
+      CHAPTER_EXHAUSTED: `<button class="act" data-e="rescue_chapter" data-n="${n}" type="button">${rescueHist(n).length ? `別のモデルで第${n}章を直す` : `上位モデルで第${n}章の指摘箇所を直す`}</button><button class="ghost" data-e="resolve" data-f="retry" type="button">書き手にもう3稿書かせる</button><button class="ghost" data-e="resolve" data-f="accept" type="button">原稿のまま採用する</button>`,
+      FINAL_REVIEW_FAILED: `<button class="act" data-e="rescue_chapter" data-n="${n}" data-pick="1" type="button">上位モデルで章を直す（最終審査の指摘を直す）</button><button class="ghost" data-e="resolve" data-f="done" type="button">原稿のまま完成とする</button>`,
       CALL_FAILED: `<button class="ghost" data-e="resolve" type="button">止まった状態を解いて、もう一度</button>`,
       CALL_TIMEOUT: `<button class="ghost" data-e="resolve" type="button">止まった状態を解いて、もう一度</button>`,
     }[x.code] || `<span class="muted">作品フォルダで対応してから「止まった状態を解く」を押してください。</span><button class="ghost" data-e="resolve" type="button">止まった状態を解く</button>`;
-    s += `<div class="alarm"><h3>止まっています：${h(ESC_JA[x.code] || x.code)}</h3><p>${h(x.detail)}</p><p class="muted">${h(x.hint)}</p><div class="row">${opts}</div></div>`;
+    const hist = x.code === "DESIGN_EXHAUSTED" ? (e.canon_rescues || []) : x.code === "CHAPTER_EXHAUSTED" ? rescueHist(n) : [];
+    s += `<div class="alarm"><h3>止まっています：${h(ESC_JA[x.code] || x.code)}</h3><p>${h(x.detail)}</p>${histHtml(hist)}<p class="muted">${h(x.hint)}</p><div class="row">${opts}</div></div>`;
   }
   return s;
 }
 
+function rescueHist(n) {
+  const c = ((S.snap.engine || {}).chapters || []).find((x) => x.n === Number(n));
+  return (c && c.rescues) || [];
+}
+
+function histHtml(hist) {
+  if (!hist.length) return "";
+  return `<p><b>これまでの上位モデルの手直し</b></p><ol class="hist">${hist.map((r) =>
+    `<li>${h(short(r.model))}：${h(r.result)}${r.note ? `<br><span class="muted">指示「${h(r.note)}」</span>` : ""}</li>`).join("")}</ol>`;
+}
+
+async function rescueDialog(a, extra) {
+  const e = S.snap.engine || {};
+  const premium = e.premium_model || "";
+  const isCh = a === "rescue_chapter";
+  const n = extra.n || e.current;
+  const hist = isCh ? rescueHist(n) : (e.canon_rescues || []);
+  const tried = new Set(hist.map((r) => r.model));
+  const list = S.models.length ? S.models.map((m) => m.id) : [premium];
+  const def = !tried.has(premium) ? premium : "";
+  const f = await dialog(`<h2>${isCh ? "上位モデルで章を直す" : "上位モデルで CANON 全体を直す"}</h2>
+    <p class="muted">選んだモデルを一回だけ呼びます（費用がかかります）。直したあと、審査役がもう一度だけ審査します。${isCh ? "直すのは指摘の箇所と前後の一、二文だけです。" : ""}</p>
+    ${histHtml(hist)}
+    ${isCh && extra.pick ? `<label class="f">直す章<input type="number" name="n" min="1" max="${(e.chapters || []).length}" value="${n}"></label>` : ""}
+    <label class="f">モデル${tried.size ? "（試したモデルには印）" : ""}<select name="model">
+      ${def ? "" : `<option value="" selected disabled>モデルを選んでください</option>`}
+      ${list.map((id) => `<option value="${h(id)}" ${id === def ? "selected" : ""}>${h(id)}${id === premium ? "（指定の上位モデル）" : ""}${tried.has(id) ? "　✓ 試した" : ""}</option>`).join("")}
+    </select></label>
+    <label class="f">指示（任意。直し方の手がかり）<textarea name="note" rows="4" placeholder="例：伏線 F2 の回収は第2章の小道具を呼び戻す形で。新しい出来事は足さない"></textarea></label>`, "このモデルで直す");
+  if (!f) return null;
+  if (!f.model) { toast("モデルを選んでください", true); return null; }
+  return { ...extra, model: f.model === premium ? "" : f.model, note: f.note, n: isCh ? Number(f.n || n) : undefined, label: short(f.model) };
+}
+
 async function engineAct(a, extra = {}) {
   if (a === "approve_view") { S.view = "canon"; render(); return; }
+  if (a === "upgrade") {
+    const r = await api("POST", `/api/works/${S.slug}/engine`, { action: "upgrade" });
+    toast(r.out || r.err, r.rc !== 0); await refresh(); return;
+  }
   if (a === "redesign") {
     const f = await dialog(`<h2>指示を足して設計をやり直す</h2><p class="muted">あなたの指示は「プロデューサーの決定」として、最優先の修正指示になります。</p><label class="f">指示<textarea name="feedback" rows="6"></textarea></label>`, "設計をやり直す");
     if (!f || !f.feedback.trim()) return;
     extra.feedback = f.feedback;
   }
-  if (a === "rescue_canon" || a === "rescue_chapter" || a === "proofread") {
-    const m = (S.snap.fixed.roles.premium && (S.snap.fixed.roles.premium.model || S.snap.fixed.roles.premium)) || "上位モデル";
+  if (a === "rescue_canon" || a === "rescue_chapter") {
+    const opt = await rescueDialog(a, extra);
+    if (!opt) return;
+    extra = opt;
+  }
+  if (a === "proofread") {
+    const m = (S.snap.engine && S.snap.engine.premium_model) || "上位モデル";
     if (!confirm(`${short(m)} を呼びます（費用がかかります）。よろしいですか。`)) return;
+  }
+  if (a === "rescue_canon" || a === "rescue_chapter" || a === "proofread") {
     const d = await api("POST", `/api/works/${S.slug}/engine`, { action: a, ...extra });
-    const r = await waitJob(d.job, { rescue_canon: "上位モデルによる CANON の修正", rescue_chapter: "上位モデルによる章の修正", proofread: "上位モデルによる校正" }[a]);
+    const r = await waitJob(d.job, { rescue_canon: `上位モデル（${extra.label || ""}）による CANON の修正`, rescue_chapter: `上位モデル（${extra.label || ""}）による第${extra.n}章の修正`, proofread: "上位モデルによる校正" }[a]);
     toast((r.out || r.err || "").trim().split("\n").pop() || "終わりました", r.rc !== 0);
     if (r.rc === 0 && a !== "proofread") await resume();  // 直したら、そのまま続ける
     return;
@@ -577,7 +627,7 @@ async function resume() {
 
 function bindEngine(el) {
   el.querySelectorAll("[data-e]").forEach((b) => (b.onclick = () => guard(() => engineAct(b.dataset.e, {
-    n: b.dataset.n ? Number(b.dataset.n) : undefined, flags: b.dataset.f ? [b.dataset.f] : [] }))));
+    n: b.dataset.n ? Number(b.dataset.n) : undefined, flags: b.dataset.f ? [b.dataset.f] : [], pick: !!b.dataset.pick }))));
 }
 
 async function renderCanon() {
@@ -637,7 +687,7 @@ async function renderWrite() {
   el.querySelectorAll("[data-view]").forEach((b) => (b.onclick = () => { S.chapterView = Number(b.dataset.view); showChapter(); }));
   if (S.chapterView) showChapter();
   const n = String(e.current || 1).padStart(2, "0");
-  const fb = await file(`work/ch${n}_feedback.md`);
+  const fb = e.phase === "done" ? null : await file(`work/ch${n}_feedback.md`);
   $("#curFb").innerHTML = fb ? `<div class="doc">${md(fb.text)}</div>` : `<p class="muted">ありません。</p>`;
   const lg = await file(`logs/run.log`);
   $("#runLog").textContent = lg ? lg.text : "";
@@ -667,12 +717,16 @@ async function renderFinish() {
       <button class="act" data-e="proofread" type="button" ${e.phase === "done" ? "" : "disabled"}>校正案を出してもらう（上位モデル）</button></div>
     ${busyLine(["上位モデル"])}
     <div id="edits"></div>
+    <h2>表紙</h2>
+    <div id="coverBox"></div>
     <h2>EPUB</h2>
+    <p class="muted">${snap.cover && snap.cover.cover ? `表紙（images/${h(snap.cover.cover)}）と著者名「${h(snap.cover.author || "")}」が入ります。` : "表紙を作ると、EPUB の最初のページと書影に入ります。"}</p>
     <div class="row"><button class="ghost" data-e="epub" type="button" ${e.phase === "done" ? "" : "disabled"}>原稿のまま作る</button>
       <button class="act" id="epubP" type="button" ${outs.includes("final_proofread.md") ? "" : "disabled"}>校正版で作る</button>
       ${epubs.map((x) => `<a href="/api/works/${S.slug}/file?path=${encodeURIComponent("output/" + x)}">${h(x)} をダウンロード</a>`).join("　")}</div>`;
   bindEngine(el);
   $("#epubP").onclick = () => guard(() => engineAct("epub", { proofread: true }));
+  renderCover();
   const rep = await file(`output/final_report.md`);
   if (rep) $("#report").innerHTML = md(rep.text);
   const ed = await file(`output/proofread_edits.json`);
@@ -689,6 +743,72 @@ async function renderFinish() {
     const r = await api("POST", `/api/works/${S.slug}/engine`, { action: "apply_proofread" });
     toast(r.out.trim().split("\n")[0] || "当てました", r.rc !== 0); await refresh();
   });
+}
+
+/* ---------------------------------------------------------------- 表紙 */
+const COVER_STYLE = { simple: "シンプル", illust: "イラスト", photo: "写実" };
+const COVER_FONT = { mincho: "明朝", gothic: "ゴシック", casual: "カジュアル" };
+const COVER_DIR = { vertical: "縦書き", horizontal: "横書き" };
+
+function seg(name, options, value) {
+  return `<div class="seg" role="radiogroup">${Object.entries(options).map(([k, v]) =>
+    `<label><input type="radio" name="${name}" value="${k}" ${k === value ? "checked" : ""}><span>${h(v)}</span></label>`).join("")}</div>`;
+}
+
+async function renderCover() {
+  const box = $("#coverBox");
+  if (!box) return;
+  const snap = S.snap, e = snap.engine || {}, cv = snap.cover || {};
+  if (!e.canon_fp) { box.innerHTML = `<p class="muted">CANON ができると、題名が決まるので表紙を作れます。</p>`; return; }
+  if (snap.tools_outdated) {
+    box.innerHTML = `<div class="notice"><p>この作品の道具（tools/）は、表紙の機能より前の版です。道具だけを最新にすると表紙を作れます。プロンプト・BRIEF・CANON・本文は変わりません（記録は notes/INTERVENTIONS.md）。</p>
+      <div class="row"><button class="act" id="cvUp" type="button">道具を最新にする</button></div></div>`;
+    $("#cvUp").onclick = () => guard(async () => {
+      const r = await api("POST", `/api/works/${S.slug}/engine`, { action: "upgrade" });
+      toast(r.out || r.err, r.rc !== 0); await refresh();
+    });
+    return;
+  }
+  if (!S.imageModels) {
+    S.imageModels = [];
+    try { S.imageModels = (await api("GET", "/api/image-models")).models; } catch (err) { /* 一覧が取れなくても「使わない」は選べる */ }
+  }
+  const ids = S.imageModels.map((m) => m.id);
+  const pref = (S.settings.cover_models || []).find((m) => ids.includes(m));
+  const model = cv.model && (cv.model === "none" || ids.includes(cv.model)) ? cv.model : (pref || ids[0] || "none");
+  const ts = encodeURIComponent(cv.ts || "");
+  box.innerHTML = `<div class="cover-grid">
+    <div class="cover-form">
+      <p>画像生成モデルには<b>文字のない絵</b>だけを描かせ、題名と著者名はこちらで組んで重ねます（画像生成モデルは日本語の文字、とくに縦書きを正しく描けないことが多いため）。題名は CANON のものを使います。</p>
+      <label class="f">画像生成モデル<select id="cvModel">
+        <option value="none" ${model === "none" ? "selected" : ""}>使わない（文字と色だけ・費用なし）</option>
+        ${S.imageModels.map((m) => `<option value="${h(m.id)}" ${m.id === model ? "selected" : ""}>${h(m.id)}${m.price ? `　1枚 $${h(m.price)}` : ""}</option>`).join("")}
+      </select></label>
+      <div class="f-group"><span class="muted">スタイル</span>${seg("cvStyle", COVER_STYLE, cv.style || "illust")}</div>
+      <label class="f">モチーフ（描いてほしいもの）<textarea id="cvMotif" rows="3" placeholder="例：霧の中の鐘楼と、手のひらに載る古い鍵">${h(cv.motif || "")}</textarea></label>
+      <div class="f-group"><span class="muted">題名</span>${seg("cvDir", COVER_DIR, cv.title_dir || "vertical")}</div>
+      <div class="f-group"><span class="muted">題名の書体</span>${seg("cvFont", COVER_FONT, cv.font || "mincho")}</div>
+      <label class="f">著者名<input type="text" id="cvAuthor" value="${h(cv.author || "")}" placeholder="EPUB の著者にも入ります"></label>
+      <div class="row"><button class="act" id="cvGo" type="button">表紙を作る</button>
+        <button class="ghost" id="cvRe" type="button" ${cv.art ? "" : "disabled"} title="前回の絵はそのままに、題名・書体・著者名だけを組み直します（費用なし）">絵はそのまま、文字だけ組み直す</button></div>
+      ${busyLine(["表紙"])}
+      ${cv.note ? `<p class="notice">${h(cv.note)}</p>` : ""}
+    </div>
+    <div class="cover-preview">${cv.cover ? `<img src="/api/works/${S.slug}/file?path=${encodeURIComponent("images/" + cv.cover)}&t=${ts}" alt="表紙『${h(cv.title || "")}』">
+      <p class="muted">${h(cv.style_ja || "")}・${h(cv.font_ja || "")}・${h(COVER_DIR[cv.title_dir] || "")}<br>${h(cv.model === "none" ? "絵なし" : short(cv.model))}${cv.usd ? `　${usd(cv.usd)}` : ""}</p>` :
+      `<div class="cover-empty">まだ表紙はありません</div>`}</div>
+  </div>`;
+  const val = (n) => (box.querySelector(`input[name=${n}]:checked`) || {}).value;
+  const make = (reuse) => guard(async () => {
+    const m = $("#cvModel").value;
+    if (!reuse && m !== "none" && !confirm(`${short(m)} で絵を描きます（費用がかかります）。よろしいですか。`)) return;
+    const d = await api("POST", `/api/works/${S.slug}/engine`, { action: "cover", model: m, style: val("cvStyle"), motif: $("#cvMotif").value,
+      title_dir: val("cvDir"), font: val("cvFont"), author: $("#cvAuthor").value, reuse_art: reuse });
+    const r = await waitJob(d.job, "表紙の作成");
+    toast((r.out || r.err || "").trim().split("\n").pop() || "表紙を作りました", r.rc !== 0);
+  });
+  $("#cvGo").onclick = () => make(false);
+  $("#cvRe").onclick = () => make(true);
 }
 
 /* ---------------------------------------------------------------- 起動 */
