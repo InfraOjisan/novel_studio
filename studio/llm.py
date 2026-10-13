@@ -72,6 +72,33 @@ def models(refresh=False):
         return []
 
 
+def image_models(refresh=False):
+    """画像生成モデルの一覧 [{id, name, price}]。OpenRouter の /images/models、なければ /models?output_modalities=image。1日キャッシュ。"""
+    CACHE.mkdir(exist_ok=True)
+    f = CACHE / "image_models.json"
+    if f.exists() and not refresh and time.time() - f.stat().st_mtime < 86400:
+        return json.loads(f.read_text(encoding="utf-8"))
+    for path in ("/images/models", "/models?output_modalities=image"):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(base_url() + path, headers={"User-Agent": "novel-studio"}), timeout=20) as r:
+                data = json.loads(r.read().decode("utf-8")).get("data", [])
+        except (urllib.error.URLError, OSError, ValueError):
+            continue
+        out = []
+        for m in data:
+            outs = ((m.get("architecture") or {}).get("output_modalities")) or []
+            if outs and "image" not in outs:
+                continue
+            p = m.get("pricing") or {}
+            price = p.get("image") or p.get("completion") or ""
+            out.append({"id": m["id"], "name": m.get("name", m["id"]), "price": str(price)})
+        if out:
+            out.sort(key=lambda x: x["id"])
+            f.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+            return out
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else []
+
+
 def price_of(model):
     for m in models():
         if m["id"] == model:

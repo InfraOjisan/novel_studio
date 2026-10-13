@@ -134,6 +134,40 @@ class EndToEnd(unittest.TestCase):
         g = subprocess.run([PY, "tools/guard.py", "check"], cwd=work, capture_output=True, text=True)
         self.assertEqual(g.returncode, 0, g.stdout)
 
+    def test_cover(self):
+        """表紙：画像生成（偽モデル）→ 文字組み → EPUB に表紙と著者名が入る。Chrome が無い環境では絵だけの表紙になる。"""
+        import struct
+        import zipfile
+        work = self.tmp / "wc"
+        self.assertTrue(scaffold.create(sample_brief(3), work)["ok"])
+        self.ctl(work, "run")
+        import hashlib
+        fp = hashlib.sha256((work / "canon" / "CANON.md").read_bytes()).hexdigest()[:8]
+        self.ctl(work, "approve-canon", env=dict(self.env, NOVEL_STUDIO_APPROVE=fp))
+        self.ctl(work, "run")
+        r = self.ctl(work, "cover", "--model", "black-forest-labs/flux.2-pro", "--style", "illust", "--motif", "霧の鐘楼",
+                     "--title-dir", "vertical", "--font", "mincho", "--author", "テスト著者")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        meta = json.loads((work / "images" / "cover.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["author"], "テスト著者")
+        self.assertTrue((work / "images" / meta["cover"]).exists())
+        if meta["cover"] == "cover.png" and not meta.get("note"):
+            w, h = struct.unpack(">II", (work / "images" / "cover.png").read_bytes()[16:24])
+            self.assertEqual((w, h), (1600, 2560))
+        usage = [json.loads(x) for x in (work / "logs" / "usage.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(any(u["role"] == "cover" and u["cost"] for u in usage))
+        # 文字だけ組み直す（モデルを呼ばない）
+        n_before = len(usage)
+        self.assertEqual(self.ctl(work, "cover", "--reuse-art", "--title-dir", "horizontal", "--font", "casual", "--author", "別名").returncode, 0)
+        self.assertEqual(len((work / "logs" / "usage.jsonl").read_text(encoding="utf-8").splitlines()), n_before)
+        self.ctl(work, "epub")
+        epub = next((work / "output").glob("*.epub"))
+        opf = zipfile.ZipFile(epub).read("OEBPS/content.opf").decode("utf-8")
+        self.assertIn("別名", opf)
+        self.assertIn('properties="cover-image"', opf)
+        g = subprocess.run([PY, "tools/guard.py", "check"], cwd=work, capture_output=True, text=True)
+        self.assertNotEqual(g.returncode, 2, g.stdout)  # 表紙は保護ファイルを触らない
+
     def test_chapter_numbers_over_twenty(self):
         work = self.tmp / "w22"
         r = scaffold.create(sample_brief(22), work)

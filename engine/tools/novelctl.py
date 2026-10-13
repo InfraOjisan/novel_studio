@@ -23,6 +23,9 @@
   python3 tools/novelctl.py reset-chapter N 第N章以降を未執筆に戻す（LEDGERも巻き戻す）
   python3 tools/novelctl.py assemble        確定済みの章を output/final.md に結合
   python3 tools/novelctl.py epub [--proofread]  縦書きEPUBと評価ページ用の作品情報を output/ に作る
+  python3 tools/novelctl.py cover [--model M] [--style simple|illust|photo] [--motif T] [--title-dir vertical|horizontal]
+                                  [--font mincho|gothic|casual] [--author T] [--reuse-art]
+                                            表紙を作る（画像生成モデルが文字のない絵を描き、題名と著者名はこちらで組む）
   python3 tools/novelctl.py polish [N] [--force]  完成稿の文体を polisher（Aion）で磨き polished/ に保存
   python3 tools/novelctl.py start polish    polish をシェルから切り離して起動（推奨）
   python3 tools/novelctl.py assemble --polished  polished/ の章を output/polished.md に結合
@@ -1453,6 +1456,10 @@ def main(argv):
     elif c == "polish":
         with Lock():
             return cmd_polish(a)
+    elif c == "cover":
+        sys.path.insert(0, str(ROOT / "tools"))
+        import make_cover
+        return make_cover.main(a)
     elif c == "epub":
         sys.path.insert(0, str(ROOT / "tools"))
         import make_epub

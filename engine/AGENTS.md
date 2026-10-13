@@ -66,7 +66,9 @@ python3 tools/novelctl.py polish             # 文体仕上げ（polisher）。p
 python3 tools/novelctl.py proofread          # 上位モデルが校正案を output/proofread_edits.json に出す（原稿は変えない）
 #   人が enabled を確かめる（studio では一覧のチェックで）
 python3 tools/proofread_apply.py             # 校正案を当てて output/final_proofread.md
-python3 tools/novelctl.py epub --proofread   # 縦書き EPUB
+python3 tools/novelctl.py cover --model <画像生成モデル|none> --style simple|illust|photo --motif "..." \
+    --title-dir vertical|horizontal --font mincho|gothic|casual --author "..."   # 表紙（images/cover.png）。費用がかかるので人の指示で
+python3 tools/novelctl.py epub --proofread   # 縦書き EPUB（表紙と著者名は images/cover.json から入る）
 ```
 
 ## 4. 人への報告（進行役が notes/REPORT.md に書く）

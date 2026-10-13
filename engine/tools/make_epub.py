@@ -24,7 +24,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
-PUB = CFG.get("publish", {})
+PUB = dict(CFG.get("publish", {}))
+# v1.0：表紙を make_cover.py（novelctl cover）で作ったら、その表紙と著者名を使う（config.json は保護対象なので書き換えない）
+_COVER = ROOT / "images" / "cover.json"
+if _COVER.exists():
+    try:
+        _cv = json.loads(_COVER.read_text(encoding="utf-8"))
+        if _cv.get("cover") and (ROOT / "images" / _cv["cover"]).exists():
+            PUB["cover_image"] = f"images/{_cv['cover']}"
+        if _cv.get("author"):
+            PUB["author"] = _cv["author"]
+    except ValueError:
+        pass
 N_CH = CFG["chapters"]
 KANJI = ["〇", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十"]
 

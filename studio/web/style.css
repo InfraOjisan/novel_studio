@@ -188,3 +188,21 @@ dialog::backdrop { background: rgba(20, 24, 22, .45); }
   .meter-tip { right: auto; left: 0; }
   .work-pick select { min-width: 0; }
 }
+
+/* 表紙 */
+.cover-grid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 28px; align-items: start; }
+.cover-form { display: grid; gap: 14px; max-width: 620px; }
+.cover-form p { margin: 0; }
+.f-group { display: flex; flex-direction: column; gap: 6px; }
+.seg { display: inline-flex; border: 1px solid var(--rule); width: max-content; max-width: 100%; flex-wrap: wrap; }
+.seg label { cursor: pointer; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg span { display: block; padding: 6px 16px; font-size: 14px; border-right: 1px solid var(--rule); background: var(--sheet); }
+.seg label:last-child span { border-right: 0; }
+.seg input:checked + span { background: var(--indigo); color: #fff; }
+.seg input:focus-visible + span { outline: 2px solid var(--indigo); outline-offset: -3px; }
+.cover-preview img { width: 100%; aspect-ratio: 5 / 8; object-fit: cover; border: 1px solid var(--rule); display: block;
+  box-shadow: 0 1px 0 var(--rule), 6px 8px 0 -2px var(--rule-soft); }
+.cover-preview p { margin-top: 10px; }
+.cover-empty { aspect-ratio: 5 / 8; border: 1px dashed var(--rule); display: grid; place-items: center; color: var(--ink-2); font-family: var(--mincho); }
+@media (max-width: 760px) { .cover-grid { grid-template-columns: 1fr; } .cover-preview { max-width: 240px; } }

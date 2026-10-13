@@ -34,6 +34,21 @@ MODELS = [
     ("moonshotai/kimi-k3", 0.5, 2.0), ("z-ai/glm-5.3", 0.4, 1.6), ("qwen/qwen3.8-flash", 0.05, 0.2),
 ]
 PRICE = {m: (i / 1e6, o / 1e6) for m, i, o in MODELS}
+IMAGE_MODELS = [("google/gemini-2.5-flash-image", 0.039), ("openai/gpt-image-2", 0.05), ("black-forest-labs/flux.2-pro", 0.04)]
+
+
+def fake_png(w=400, h=640, seed="x"):
+    """標準ライブラリだけで、グラデーションの PNG を作る（偽の画像生成）。"""
+    import struct
+    import zlib
+    hsh = int(hashlib.md5(seed.encode()).hexdigest()[:6], 16)
+    r0, g0, b0 = (hsh >> 16) & 255, (hsh >> 8) & 255, hsh & 255
+    raw = b"".join(b"\x00" + bytes(v for x in range(w) for v in (
+        (r0 * (h - y) + 30 * y) // h, (g0 * (h - y) + 40 * y) // h, (b0 * (h - y) + 70 * y) // h)) for y in range(h))
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b"")
 
 WORDS = ["霧", "灯", "石段", "川面", "鈴", "外套", "指先", "帳面", "窓", "足音", "古い地図", "湯気", "鍵", "蝋燭", "砂", "風見",
          "階段", "手紙", "硝子", "縄", "舟", "鐘楼", "棚", "籠", "影", "火床", "泥", "袖", "羽根", "皿"]
@@ -228,6 +243,9 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        if self.path.rstrip("/").endswith("/images/models") or "output_modalities=image" in self.path:
+            return self._json(200, {"data": [{"id": m, "name": m, "architecture": {"input_modalities": ["text"], "output_modalities": ["image"]},
+                                              "pricing": {"image": str(p)}} for m, p in IMAGE_MODELS]})
         if self.path.rstrip("/").endswith("/models"):
             return self._json(200, {"data": [{"id": m, "name": m, "context_length": 200000,
                                               "pricing": {"prompt": f"{i / 1e6:.10f}", "completion": f"{o / 1e6:.10f}"}} for m, i, o in MODELS]})
@@ -235,6 +253,15 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if self.path.rstrip("/").endswith("/images"):
+            if body.get("model") not in dict(IMAGE_MODELS):
+                return self._json(404, {"error": {"message": "mock: not an image model"}})
+            if body.get("aspect_ratio") == "2:3" and body.get("model") == "black-forest-labs/flux.2-pro":
+                return self._json(400, {"error": {"message": "mock: aspect ratio not supported"}})  # 縦横比の切り替えを通すため
+            time.sleep(float(os.environ.get("MOCK_DELAY", "0")))
+            png = fake_png(seed=body.get("prompt", "") + body["model"])
+            return self._json(200, {"created": int(time.time()), "data": [{"b64_json": __import__("base64").b64encode(png).decode(), "media_type": "image/png"}],
+                                    "usage": {"cost": dict(IMAGE_MODELS)[body["model"]]}})
         text = body["messages"][-1]["content"]
         model = (body.get("models") or [body.get("model")])[0]
         if model == "mock/broken":

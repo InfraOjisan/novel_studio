@@ -3,6 +3,7 @@
 
   python3 engine/tools/scaffold.py lint  brief.json                 BRIEF の機械検査（JSON で結果を返す）
   python3 engine/tools/scaffold.py render brief.json                BRIEF.md を標準出力へ
+  python3 engine/tools/scaffold.py upgrade works/<slug>             作りかけの作品の tools/ だけを最新にする（表紙など新しい機能を使うため）
   python3 engine/tools/scaffold.py create brief.json works/<slug> [--roles roles.json] [--budget 3.0]
                                                                      作品フォルダを作る（engine をコピー → BRIEF.md・config.json・
                                                                      CANON テンプレートを生成 → init → guard seal）
@@ -303,7 +304,35 @@ def create(b, dest, roles=None, budget=None, extra_top=()):
             "log": (r1.stdout + r2.stdout).strip()}
 
 
+def upgrade(dest):
+    """作りかけの作品の tools/ だけを、いまの engine の版に入れ替える（プロンプト・テンプレート・BRIEF・CANON は変えない）。
+    保護ファイルの指紋を取り直し、notes/INTERVENTIONS.md に記録する。人の操作として行う。"""
+    dest = Path(dest)
+    if not (dest / "tools" / "novelctl.py").exists():
+        return {"ok": False, "errors": [f"{dest} は作品フォルダではありません"]}
+    changed = []
+    for f in sorted((ENGINE / "tools").glob("*.py")):
+        if f.name == "scaffold.py":
+            continue
+        old = dest / "tools" / f.name
+        if not old.exists() or old.read_bytes() != f.read_bytes():
+            shutil.copy(f, old)
+            changed.append(f.name)
+    if changed:
+        py = sys.executable or "python3"
+        subprocess.run([py, "tools/guard.py", "seal"], cwd=dest, capture_output=True, text=True)
+        (dest / "notes").mkdir(exist_ok=True)
+        with open(dest / "notes" / "INTERVENTIONS.md", "a", encoding="utf-8") as fp:
+            fp.write(f"- {datetime.datetime.now().isoformat(timespec='seconds')} 道具を最新にした（tools/ の {', '.join(changed)}）。"
+                     "プロンプト・テンプレート・BRIEF・CANON は変えていない。保護ファイルの指紋を取り直した。\n")
+    return {"ok": True, "changed": changed}
+
+
 def main(argv):
+    if len(argv) >= 2 and argv[0] == "upgrade":
+        r = upgrade(argv[1])
+        print(json.dumps(r, ensure_ascii=False, indent=1))
+        return 0 if r["ok"] else 2
     if len(argv) < 2 or argv[0] not in ("lint", "render", "create"):
         print(__doc__)
         return 1

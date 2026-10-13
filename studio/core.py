@@ -37,6 +37,8 @@ DEFAULT_SETTINGS = {
     "roles": {"writer": "anthropic/claude-haiku-5.5", "reviewer": "openai/gpt-6-luna-pro",
               "polisher": "anthropic/claude-haiku-5.5", "premium": "anthropic/claude-opus-5.5"},
     "threshold": 0.5,
+    # 表紙の画像生成モデル。一覧（/images/models）にあるものから、この順で既定を選ぶ
+    "cover_models": ["google/gemini-2.5-flash-image", "openai/gpt-image-2", "bytedance-seed/seedream-4.5", "black-forest-labs/flux.2-pro"],
 }
 
 
@@ -550,11 +552,45 @@ ENGINE_ACTIONS = {
     "proofread": lambda a: ["proofread"] + [str(int(x)) for x in a.get("chapters", [])],
     "assemble": lambda a: ["assemble"],
     "epub": lambda a: ["epub"] + (["--proofread"] if a.get("proofread") else []),
+    "cover": lambda a: cover_args(a),
 }
+
+COVER_STYLES = {"simple": "シンプル", "illust": "イラスト", "photo": "写実"}
+COVER_FONTS = {"mincho": "明朝", "gothic": "ゴシック", "casual": "カジュアル"}
+
+
+def cover_args(a):
+    """表紙の指定を novelctl cover の引数にする。値は決められた選択肢だけを通す。"""
+    style = a.get("style") if a.get("style") in COVER_STYLES else "illust"
+    font = a.get("font") if a.get("font") in COVER_FONTS else "mincho"
+    tdir = a.get("title_dir") if a.get("title_dir") in ("vertical", "horizontal") else "vertical"
+    out = ["cover", "--style", style, "--font", font, "--title-dir", tdir,
+           "--motif", str(a.get("motif", ""))[:400], "--author", str(a.get("author", ""))[:60]]
+    if a.get("reuse_art"):
+        out.append("--reuse-art")
+    else:
+        out += ["--model", str(a.get("model") or "none")]
+    if a.get("title"):
+        out += ["--title", str(a["title"])[:80]]
+    return out
+
+
+def upgrade_tools(slug):
+    return scaffold.upgrade(wdir(slug))
+
+
+def cover_info(slug):
+    f = wdir(slug) / "images" / "cover.json"
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
 
 
 def engine_action(slug, action, args=None):
     args = args or {}
+    if action == "upgrade":
+        r = upgrade_tools(slug)
+        return {"rc": 0 if r["ok"] else 2, "out": "道具を最新にしました：" + (", ".join(r.get("changed", [])) or "変更なし"), "err": "；".join(r.get("errors", []))}
+    if action == "cover" and not (wdir(slug) / "tools" / "make_cover.py").exists():
+        raise StudioError("この作品の道具は、表紙の機能より前の版です。表紙の欄の「道具を最新にする」を押してください")
     if action == "apply_proofread":
         d = wdir(slug)
         r = subprocess.run([sys.executable, "tools/proofread_apply.py"], cwd=d, capture_output=True, text=True)
@@ -577,7 +613,8 @@ def set_edits(slug, enabled):
 
 
 SAFE_READ = re.compile(r"^(BRIEF\.md|brief\.json|config\.json|canon/CANON\.md|chapters/ch\d\d\.md|polished/ch\d\d\.md|work/ch\d\d_(feedback\.md|verdict_a\d+\.json|draft\.md)|"
-                       r"work/canon_feedback\.md|work/canon_review_notes\.md|state/LEDGER\.md|output/[^/]+\.(md|json|epub)|logs/run\.(log|out)|notes/[^/]+\.md)$")
+                       r"work/canon_feedback\.md|work/canon_review_notes\.md|state/LEDGER\.md|output/[^/]+\.(md|json|epub)|logs/run\.(log|out)|notes/[^/]+\.md|"
+                       r"images/cover(_art)?\.(png|jpg|jpeg|webp)|images/cover\.json)$")
 
 
 def read_file(slug, rel):
@@ -586,7 +623,7 @@ def read_file(slug, rel):
     f = wdir(slug) / rel
     if not f.exists():
         return None
-    if rel.endswith(".epub"):
+    if rel.endswith((".epub", ".png", ".jpg", ".jpeg", ".webp")):
         return f
     t = f.read_text(encoding="utf-8", errors="replace")
     if rel.startswith("logs/"):
@@ -625,4 +662,6 @@ def snapshot(slug):
         out["canon_fp"] = canon_fingerprint(slug)
         od = wdir(slug) / "output"
         out["outputs"] = sorted(p.name for p in od.iterdir()) if od.exists() else []
+        out["cover"] = cover_info(slug)
+        out["tools_outdated"] = not (wdir(slug) / "tools" / "make_cover.py").exists()
     return out

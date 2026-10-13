@@ -33,6 +33,8 @@ novel_studio v1.0 の道具は、すべて「JSON を入れて JSON を出す」
 | `engine <slug> polish` | — | `status` | 文体の磨き（任意） | 章の数 | 確認 |
 | `engine <slug> proofread [--chapters 1,2]` | — | `status` | 上位モデルの校正案を `output/proofread_edits.json` に | 章の数（上位） | **確認** |
 | `engine <slug> apply_proofread` | — | 出力 | 採った校正案を当てて校正版を作る | なし | 確認 |
+| `engine <slug> cover [--model M] [--style S] [--motif T] [--title-dir D] [--font F] [--author A] [--reuse-art]` | — | 出力 | 表紙を作る（images/cover.png・cover.json） | 1回（画像生成。`--reuse-art` と `--model none` はなし） | **確認** |
+| `image-models` | — | `models[]` | なし | なし | 許可 |
 | `engine <slug> epub` | — | 出力 | 縦書き EPUB | なし | 許可 |
 | `status <slug>` | — | `phase` `current` `chapters[]` `slots` `escalation` `next` `usage` `running` | なし | なし | 許可 |
 | `costs <slug>` | — | `studio{}` `engine{}` `total_usd` | なし | なし | 許可 |
