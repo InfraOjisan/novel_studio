@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## v1.1.1（2026-10-13）
+
+- **OpenCode（Go・Zen）のモデルで動くようにした。** OpenCode Go で HTTP 403「error code: 1010」になっていた件。
+  - 原因1：studio の呼び出しが User-Agent を名乗っておらず、Python の既定（`Python-urllib/3.x`）のまま送っていた。OpenCode の前の Cloudflare はこれを弾く（2026-10-13 に実際に確かめた：同じ GET /models が Python-urllib だと 403・1010、道具の名前だと 200）。
+  - 原因2：OpenCode Go は `x-opencode-session` ヘッダが必須になっていた（ないと HTTP 400・MissingSessionID）。作品ごとに同じ値を送る（プロンプトのキャッシュに効く）。
+  - 窓口の使い分け：OpenCode では Claude・MiniMax・Qwen は `/messages`、GPT・Grok・Muse は `/responses`、ほかは `/chat/completions`。モデル名と base_url から自動で決め、合わなければ別の窓口で一度ずつ出し直す。`NOVEL_LLM_PROTOCOLS="接頭辞:窓口,..."` か config.json の `llm.protocols` で指定もできる。
+  - 費用：OpenCode は応答に費用を入れないので、公開価格の表（`engine/tools/llm_wire.py` の PRICES）で見積もる。表にないモデルは `NOVEL_LLM_PRICES="gpt-6-luna=1.25/10"`（1M トークンあたりのドル、入力/出力）で足せる。画面の費用は、見積もりを含むと「≈」、価格の分からない呼び出しがあると「+?」がつく。
+  - 新しい共通部品 `engine/tools/llm_wire.py`（studio・engine・表紙の三か所が同じヘッダと窓口を使う）。
+  - 作りかけの作品は、執筆の画面の「道具を最新にする」を押すと直る（tools/ だけを入れ替え。BRIEF・CANON・本文は変わらない）。
+- **テーマを直して、提案を頼み直せるようにした（一 テーマの画面）。** 新しい作品フォルダの名前を必ず変える方式。
+  - 元の作品には一切触れない（提案・分類・BRIEF・本文・ログもそのまま）。同じ名前・すでにある名前・中身のあるフォルダには作らない＝上書きが起きない。
+  - 新しい作品には「どの作品の、どの版のテーマから、どの欄を変えたか」が残り、元の作品の画面には派生した作品の一覧が出る。確定済みの作品からも派生できる。
+  - CLI：`python3 studio/cli.py derive <元> <新しい名前> [--theme theme.json]`。
+  - これまでの「この作品フォルダのまま、テーマを変えて最初からやり直す」は畳んで残した。
+- 偽モデルに OpenCode の真似（`/zen/go/v1`：User-Agent と session の門、`/responses`・`/messages`、費用なしの応答）を足した。回帰テストに窓口の判定・組み立て・読み取り・見積もりと、偽 OpenCode での studio と engine の通し、派生を追加（17 件）。
+
 ## v1.1.0（2026-10-13）
 
 - 表紙：EPUB を作る前に、画像生成モデルを選んで表紙を作れるようにした（仕上げの画面、`novelctl cover`、`cli.py engine <slug> cover`）。

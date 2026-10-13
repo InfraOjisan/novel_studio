@@ -32,6 +32,10 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import llm_wire as wire  # noqa: E402  窓口ごとの違い（ヘッダ・/responses・/messages）。v1.1.1
+import hashlib  # noqa: E402
+SESSION = "novelctl-" + hashlib.sha1(str(ROOT).encode()).hexdigest()[:16]  # 作品ごとに同じ値（x-opencode-session）
 CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
 LLM = CFG["llm"]
 JSON_TASKS = {"canon-review", "review", "final", "proofread"}
@@ -93,14 +97,9 @@ class Progress:
 
 
 def request(url, key, body, idle_timeout):
-    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST", headers={
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-        "Authorization": f"Bearer {key}",
-        "User-Agent": "novelctl/1.0",
-        "HTTP-Referer": LLM.get("app_url", "https://localhost/novelctl"),
-        "X-Title": LLM.get("app_title", "novelctl"),
-    })
+    # User-Agent はライブラリ名にしない（Cloudflare の 403・error code 1010 を避ける）。OpenCode には作品ごとの session を渡す
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST",
+                                 headers=wire.headers(key, "chat", session=SESSION, title=LLM.get("app_title", "novelctl"), stream=True))
     # timeout はソケットの1回の読み取りごとに効く＝無通信タイムアウトとして働く
     return urllib.request.urlopen(req, timeout=idle_timeout)
 
@@ -221,9 +220,14 @@ def build_body(role, task, text):
 def log_usage(role, task, model, usage, sec, chars, ok=True, note=""):
     """費用の家計簿（v1.0）。OpenRouter は usage.include=true で cost（ドル）を返す。"""
     u = usage or {}
+    cost = u.get("cost")
     rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "role": role, "task": task, "model": model,
-           "in": u.get("prompt_tokens"), "out": u.get("completion_tokens"), "cost": u.get("cost"),
+           "in": u.get("prompt_tokens"), "out": u.get("completion_tokens"), "cost": cost,
            "sec": round(sec, 1), "chars": chars, "ok": ok}
+    if cost is None:  # OpenCode は費用を返さない：公開価格（llm_wire.PRICES・llm.prices・NOVEL_LLM_PRICES）で見積もる
+        est = wire.estimate_cost(model, u, LLM.get("prices"))
+        if est is not None:
+            rec["cost"], rec["est"] = est, True
     if note:
         rec["note"] = note
     try:
@@ -232,6 +236,32 @@ def log_usage(role, task, model, usage, sec, chars, ok=True, note=""):
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError:
         pass
+
+
+def nonstream_once(base, key, proto, chat_body, prog, idle_timeout, deadline=None):
+    """/responses と /messages の窓口（OpenCode の GPT・Claude など）。ストリーミングせずに一度で受ける。"""
+    msgs = chat_body["messages"]
+    system = next((m["content"] for m in msgs if m["role"] == "system"), "")
+    user = next((m["content"] for m in msgs if m["role"] == "user"), "")
+    eff = (chat_body.get("reasoning") or {}).get("effort")
+    path, body = wire.build(proto, chat_body["model"], system, user, chat_body.get("temperature"), chat_body.get("max_tokens", 24000),
+                            eff, "response_format" in chat_body)
+    timeout = int(deadline * 1.5) if deadline else max(600, idle_timeout * 5)
+    req = urllib.request.Request(base + path, data=json.dumps(body).encode("utf-8"), method="POST",
+                                 headers=wire.headers(key, proto, session=SESSION, title=LLM.get("app_title", "novelctl")))
+    prog.tick(force=True)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            d = json.loads(r.read().decode("utf-8"))
+    except (socket.timeout, TimeoutError):
+        raise Deadline(f"{timeout}秒たっても応答がない（{proto}）")
+    try:
+        content, finish, usage, model = wire.parse(proto, d)
+    except ValueError as e:
+        raise ApiError(str(e))
+    prog.content = len(content)
+    prog.tick(force=True)
+    return content, finish, usage, model
 
 
 def run(role, task, text, progress_path=None):
@@ -243,6 +273,11 @@ def run(role, task, text, progress_path=None):
     base = (env_value("NOVEL_LLM_BASE_URL") or LLM.get("base_url", "https://openrouter.ai/api/v1")).rstrip("/")
     url = f"{base}/chat/completions"
     body = build_body(role, task, text)
+    proto = wire.protocol_for(base, body["model"], LLM.get("protocols"))
+    if wire.is_opencode(base):
+        body.pop("usage", None)  # OpenRouter 固有の欄は送らない
+        body.pop("models", None)
+    spare = wire.alternatives(proto) if wire.is_opencode(base) else []
     idle = LLM.get("idle_timeout_sec", 180)
     # 締め切りも task_overrides で上書きできる（第6回：設計は束が大きく推論が長い。2026-10-11）
     deadline = {**(LLM.get("profiles", {}).get(role) or {}), **LLM.get("task_overrides", {}).get(task, {})}.get("deadline_sec")
@@ -253,18 +288,30 @@ def run(role, task, text, progress_path=None):
         prog.attempt, prog.reasoning, prog.content = attempt, 0, 0
         t0 = time.time()
         try:
-            content, finish, usage, model = stream_once(url, key, body, prog, idle, deadline)
+            if proto == "chat":
+                content, finish, usage, model = stream_once(url, key, body, prog, idle, deadline)
+            else:
+                content, finish, usage, model = nonstream_once(base, key, proto, body, prog, idle, deadline)
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:800]
             last = f"HTTP {e.code}: {detail}"
             err(f"attempt {attempt}: {last}")
-            if e.code == 400 and "response_format" in body:
+            low = detail.lower()
+            if spare and (e.code == 404 or "endpoint" in low or "not supported" in low or "unsupported" in low):
+                proto = spare.pop(0)  # 窓口の取り違え：別の窓口で出し直す
+                err(f"窓口を {proto} に切り替えて出し直します")
+                continue
+            fixable = e.code == 400 and "MissingSessionID" not in detail
+            if fixable and "response_format" in body:
                 body.pop("response_format")
+                continue
+            if fixable and "temperature" in body and "temperature" in low:
+                body.pop("temperature")  # 推論型のモデルは temperature を受け付けないことがある
                 continue
             if e.code in RETRY_HTTP:
                 time.sleep(min(60, 5 * 2 ** attempt))
                 continue
-            die(last)
+            die(last + wire.hint(e.code, detail, proto))
         except (socket.timeout, TimeoutError) as e:
             last = f"{idle}秒間なにも受信しなかった（無通信タイムアウト）: {e}"
             err(f"attempt {attempt}: {last}")

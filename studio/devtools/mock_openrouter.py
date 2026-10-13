@@ -249,7 +249,28 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _gate(self):
+        """本物の OpenCode Go で確かめた門（2026-10-13）を真似る。通さないときは応答を返して True。"""
+        if self.headers.get("User-Agent", "Python-urllib").startswith("Python-urllib"):
+            data = b"error code: 1010"  # Cloudflare：ライブラリ名の User-Agent は弾かれる
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return True
+        if self.command == "POST" and "/zen/go/" in self.path and not self.headers.get("x-opencode-session"):
+            self._json(400, {"type": "error", "error": {"type": "MissingSessionID",
+                                                         "message": "Request is missing x-opencode-session and cannot be routed efficiently."}})
+            return True
+        return False
+
     def do_GET(self):
+        if self._gate():
+            return
+        if "/zen/" in self.path and self.path.rstrip("/").endswith("/models"):  # OpenCode：価格なしの一覧
+            return self._json(200, {"object": "list", "data": [{"id": m.split("/")[-1], "object": "model", "owned_by": "opencode"}
+                                                               for m, _, _ in MODELS] + [{"id": "mockwire-odd", "object": "model"}]})
         if self.path.rstrip("/").endswith("/images/models") or "output_modalities=image" in self.path:
             return self._json(200, {"data": [{"id": m, "name": m, "architecture": {"input_modalities": ["text"], "output_modalities": ["image"]},
                                               "pricing": {"image": str(p)}} for m, p in IMAGE_MODELS]})
@@ -260,6 +281,11 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if self._gate():
+            return
+        path = self.path.rstrip("/")
+        if path.endswith("/responses") or path.endswith("/messages") or "/zen/" in path:
+            return self._opencode(path, body)
         if self.path.rstrip("/").endswith("/images"):
             if body.get("model") not in dict(IMAGE_MODELS):
                 return self._json(404, {"error": {"message": "mock: not an image model"}})
@@ -299,11 +325,63 @@ class H(BaseHTTPRequestHandler):
         self._json(200, {"model": model, "choices": [{"message": {"role": "assistant", "content": out}, "finish_reason": "stop"}], "usage": usage})
 
 
+def zen_route(model):
+    """偽 OpenCode の窓口の割り当て。mockwire-odd は道具の規則（chat）と違う /messages にだけある＝窓口の切り替えを試すため。"""
+    m = model.split("/")[-1]
+    if re.match(r"^(gpt|grok|muse)", m):
+        return "responses"
+    if re.match(r"^(claude-|minimax|qwen|mockwire-odd)", m):
+        return "messages"
+    return "chat"
+
+
+def _opencode_handler(self, path, body):
+    proto = "responses" if path.endswith("/responses") else "messages" if path.endswith("/messages") else "chat"
+    model = body.get("model", "")
+    if "/zen/" in path and zen_route(model) != proto:
+        return self._json(404, {"type": "error", "error": {"type": "NotFound", "message": f"Model {model} is not supported on this endpoint"}})
+    if proto == "messages" and not self.headers.get("anthropic-version"):
+        return self._json(400, {"type": "error", "error": {"type": "invalid_request_error", "message": "anthropic-version header is required"}})
+    if proto == "responses":
+        inp = body.get("input")
+        text = inp if isinstance(inp, str) else "".join(x.get("content", "") for x in inp or [] if isinstance(x.get("content"), str))
+    elif proto == "messages":
+        text = (body.get("messages") or [{}])[-1].get("content", "")
+    else:
+        text = (body.get("messages") or [{}])[-1].get("content", "")
+    m = re.match(r"<!-- TASK: (\S+)(?: CH=(\d+))?", text)
+    st = re.search(r"<!-- STUDIO: (\S+) -->", text)
+    out = engine_answer(m.group(1), int(m.group(2) or 0), text, model) if m else studio_answer(st.group(1), text, model) if st else "OK"
+    time.sleep(float(os.environ.get("MOCK_DELAY", "0")))
+    pin, pout = len(text) // 2, len(out) // 2  # 費用は返さない（OpenCode と同じ）
+    if proto == "responses":
+        return self._json(200, {"id": "resp_mock", "object": "response", "model": model, "status": "completed",
+                                "output": [{"type": "reasoning", "summary": []},
+                                           {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": out}]}],
+                                "usage": {"input_tokens": pin, "output_tokens": pout}})
+    if proto == "messages":
+        return self._json(200, {"id": "msg_mock", "type": "message", "role": "assistant", "model": model, "stop_reason": "end_turn",
+                                "content": [{"type": "text", "text": out}], "usage": {"input_tokens": pin, "output_tokens": pout}})
+    usage = {"prompt_tokens": pin, "completion_tokens": pout}
+    if body.get("stream"):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        for i in range(0, len(out), 400):
+            self.wfile.write(f"data: {json.dumps({'model': model, 'choices': [{'delta': {'content': out[i:i + 400]}}]}, ensure_ascii=False)}\n\n".encode())
+        self.wfile.write(f"data: {json.dumps({'model': model, 'choices': [{'delta': {}, 'finish_reason': 'stop'}], 'usage': usage})}\n\ndata: [DONE]\n\n".encode())
+        return
+    return self._json(200, {"model": model, "choices": [{"message": {"role": "assistant", "content": out}, "finish_reason": "stop"}], "usage": usage})
+
+
+H._opencode = _opencode_handler
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     a = ap.parse_args()
-    print(f"mock OpenRouter on http://127.0.0.1:{a.port}/api/v1", flush=True)
+    print(f"mock OpenRouter on http://127.0.0.1:{a.port}/api/v1  （OpenCode Go の真似は /zen/go/v1）", flush=True)
     ThreadingHTTPServer(("127.0.0.1", a.port), H).serve_forever()
 
 

@@ -3,7 +3,7 @@
 生成 AI に小説を一から書かせるための道具です。テーマを入れると、複数のモデルが企画を出し、似た案と外れた案を見分け、選んだ案から執筆指示書（BRIEF）を作り、設定書（CANON）・各章の執筆・審査・校正・縦書き EPUB まで、一つの画面で進みます。
 
 - Python 3.9 以上の標準ライブラリだけで動きます（pip install は不要）。
-- モデルは OpenRouter（OpenAI 互換の窓口なら差し替え可）。
+- モデルは OpenRouter か OpenCode（Go・Zen）。OpenAI 互換の窓口なら差し替え可。
 - 自分の Mac（127.0.0.1）で使う前提です。
 
 ```
@@ -12,11 +12,20 @@ echo "OPENROUTER_API_KEY=sk-or-..." > .env
 python3 studio/server.py          # → http://127.0.0.1:8780
 ```
 
+OpenCode Go を使うときは `.env` を次のようにします（モデル名は `claude-haiku-5-5`・`gpt-6-luna`・`deepseek-v4.1-flash` のように OpenCode の名前で選びます）。
+
+```
+NOVEL_LLM_BASE_URL=https://opencode.ai/zen/go/v1
+NOVEL_PROVIDER_APIKEY=<OpenCode の鍵>
+```
+
+窓口（`/chat/completions`・`/responses`・`/messages`）はモデル名から自動で選びます。OpenCode は費用を返さないので、公開価格で見積もります（表にないモデルは `NOVEL_LLM_PRICES`）。詳しくは [CHANGELOG](CHANGELOG.md) の v1.1.1。
+
 ## 流れ
 
 | 工程 | 何をするか | 既定のモデル |
 |---|---|---|
-| 一 テーマ | ジャンル・題材・章の数・想定読者・結末の型 | 人 |
+| 一 テーマ | ジャンル・題材・章の数・想定読者・結末の型。あとから**テーマを直して、新しい作品フォルダで提案を頼み直せる**（元の作品はそのまま） | 人 |
 | 二 提案 | 選んだモデルに n 案ずつ並列で出させる。案ごとの費用つき。再提出・指示つき再提出・**収束した骨格を避けて再提出**・案の編集・指示しての改稿 | Haiku 5.5 / GPT-6 Luna Pro / DeepSeek V4.1 Flash ほか |
 | 三 分類 | 骨格をモデルに抜き出させ、**似ているかは道具が数える** →「収束」「バリエーション」「外れ値」 | Luna Pro（抽出だけ） |
 | 四 BRIEF | 選んだ案から BRIEF を JSON で作り、機械検査し、Markdown に描き出す。指示つき改訂・直接編集 | Opus 5.5 |

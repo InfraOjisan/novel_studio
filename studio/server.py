@@ -131,6 +131,9 @@ class H(BaseHTTPRequestHandler):
             if act == "theme":
                 core.change_theme(slug, b["theme"])
                 return self._send(200, {"ok": True})
+            if act == "derive":
+                st = core.derive_work(slug, (b.get("new_slug") or "").strip(), b["theme"])
+                return self._send(200, {"slug": st["slug"]})
             if act == "propose":
                 return self._send(200, {"job": run_job(slug, "propose", core.propose, slug, b["models"], b.get("n", 2), b.get("instruction", ""),
                                                        b.get("mode", "new"), float(b.get("temperature", 0.8)))})

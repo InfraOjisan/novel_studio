@@ -8,6 +8,7 @@
   python3 studio/cli.py new <slug> --theme theme.json
   python3 studio/cli.py show <slug> [--brief]                 状態の要約（--brief で提案の本文を省く）
   python3 studio/cli.py theme <slug> --theme theme.json        テーマを変えて最初から（記録は studio/history/ に退避）
+  python3 studio/cli.py derive <slug> <new-slug> [--theme theme.json]  テーマを直して、新しい作品フォルダで提案し直す（元の作品は変えない）
   python3 studio/cli.py propose <slug> --models m1,m2 [--n 2] [--mode new|resubmit|rolling] [--instruction "..."] [--temperature 0.8]
   python3 studio/cli.py edit <slug> <pid> --fields fields.json  人（または進行役）が案を直す。新しい案として足される
   python3 studio/cli.py revise <slug> <pid> --model m --instruction "..."
@@ -52,7 +53,7 @@ def summary(st, short=False):
         if lab:
             props[pid]["label"] = lab["label"]
     c = st.get("classify") or {}
-    return {"slug": st["slug"], "stage": core.stage_of(st), "theme": st["theme"], "theme_version": st["theme_version"],
+    return {"slug": st["slug"], "stage": core.stage_of(st), "theme": st["theme"], "theme_version": st["theme_version"], "derived_from": st.get("derived_from"),
             "rounds": [{k: r[k] for k in ("id", "mode", "models", "n", "proposals", "errors")} for r in st["rounds"]],
             "proposals": props, "selected": st.get("selected"),
             "classify": {"clusters": [{k: cl.get(k) for k in ("id", "label", "type", "members", "cohesion")} for cl in c.get("clusters", [])],
@@ -111,6 +112,9 @@ def main(argv):
         if a.cmd == "theme":
             core.change_theme(A[0], rd_json(a.theme))
             return out(summary(core.load(A[0])))
+        if a.cmd == "derive":  # derive <元の作品> <新しい作品> --theme theme.json（テーマを直して新しい作品で出し直す）
+            st = core.derive_work(A[0], A[1], rd_json(a.theme) if a.theme else core.load(A[0])["theme"])
+            return out(summary(st))
         if a.cmd == "propose":
             models = [m.strip() for m in (a.models or ",".join(core.settings()["propose_models"])).split(",") if m.strip()]
             return out(core.propose(A[0], models, a.n, a.instruction, a.mode, a.temperature))

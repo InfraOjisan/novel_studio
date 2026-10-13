@@ -91,7 +91,7 @@ def record_cost(slug, stage, rec, note=""):
 
 def costs(slug):
     """studio の費用（工程ごと）と engine の費用（役ごと）。"""
-    out = {"studio": {}, "engine": {}, "studio_usd": 0.0, "engine_usd": 0.0}
+    out = {"studio": {}, "engine": {}, "studio_usd": 0.0, "engine_usd": 0.0, "estimated": 0, "unpriced": 0}
     f = wdir(slug) / "studio" / "usage.jsonl"
     if f.exists():
         for line in f.read_text(encoding="utf-8").splitlines():
@@ -103,6 +103,8 @@ def costs(slug):
             b["usd"] += float(r.get("usd") or 0)
             b["calls"] += 1
             out["studio_usd"] += float(r.get("usd") or 0)
+            out["estimated"] += 1 if r.get("price") == "estimated" else 0
+            out["unpriced"] += 1 if r.get("price") == "unknown" else 0
     g = wdir(slug) / "logs" / "usage.jsonl"
     if g.exists():
         for line in g.read_text(encoding="utf-8").splitlines():
@@ -114,6 +116,8 @@ def costs(slug):
             b["usd"] += float(r.get("cost") or 0)
             b["calls"] += 1
             out["engine_usd"] += float(r.get("cost") or 0)
+            out["estimated"] += 1 if r.get("est") else 0
+            out["unpriced"] += 1 if r.get("cost") is None and r.get("in") is not None else 0
     for grp in (out["studio"], out["engine"]):
         for b in grp.values():
             b["usd"] = round(b["usd"], 5)
@@ -147,6 +151,8 @@ def create_work(slug, theme):
     d = wdir(slug)
     if (d / "studio.json").exists():
         raise StudioError(f"作品 {slug} はすでにあります")
+    if d.exists() and any(d.iterdir()):
+        raise StudioError(f"フォルダ works/{slug} にはすでに何か入っています。別の名前にしてください")
     d.mkdir(parents=True, exist_ok=True)
     st = {"slug": slug, "created": now(), "theme": theme, "theme_version": 1, "rounds": [], "proposals": {},
           "classify": None, "selected": None, "briefs": [], "fixed": None, "next_pid": 1, "log": [f"{now()} 作品を作成"]}
@@ -164,6 +170,60 @@ def list_works():
                 out.append({"slug": d.name, "title": (st["theme"].get("theme") or "")[:40], "created": st["created"],
                             "stage": stage_of(st, d), "fixed": bool(st.get("fixed"))})
     return out
+
+
+THEME_DEFAULTS = {"audience": "一般読者", "chapters": 8, "chapter_target": 3000}  # 画面のフォームの初期値（app.js の themeForm と同じ）
+THEME_LABELS = {**THEME_FIELDS, "chapters": "章の数", "chapter_target": "1章の字数"}
+
+
+def theme_diff(old, new):
+    """変えた欄の名前（日本語）。欄がないのとフォームの初期値は同じとみなす。"""
+    def val(t, k):
+        v = t.get(k)
+        return str(THEME_DEFAULTS.get(k, "") if v in (None, "") else v).strip()
+    return [THEME_LABELS[k] for k in THEME_LABELS if val(old, k) != val(new, k)]
+
+
+def suggest_slug(slug):
+    """派生の作品フォルダの名前の候補（ice-moon → ice-moon-2 → ice-moon-3 …。使われていないもの）。"""
+    base = re.sub(r"-\d+$", "", slug)[:56]
+    for i in range(2, 1000):
+        cand = f"{base}-{i}"
+        if not (WORKS / cand).exists():
+            return cand
+    return base + "-x"
+
+
+def derive_work(src, new_slug, theme):
+    """テーマを直して、新しい作品フォルダで提案からやり直す（v1.1.1）。
+    元の作品には一切触れない（提案・分類・BRIEF・本文・ログもそのまま）。フォルダの名前は必ず変える＝上書きが起きない。"""
+    s = load(src)
+    if (new_slug or "").strip() == src:
+        raise StudioError(f"新しい作品フォルダの名前は、いまの「{src}」とは別にしてください")
+    if wdir(new_slug).exists():
+        raise StudioError(f"作品フォルダ「{new_slug}」はもうあります。別の名前にしてください（候補：{suggest_slug(new_slug)}）")
+    st = create_work(new_slug, theme)
+    changed = theme_diff(s["theme"], theme)
+    st["derived_from"] = {"slug": src, "theme_version": s["theme_version"], "at": now(), "changed": changed}
+    st["log"].append(f"{now()} 《{src}》のテーマ（版{s['theme_version']}）を直して作成。変えた欄：{'・'.join(changed) or 'なし（同じテーマで出し直し）'}")
+    save(new_slug, st)
+    return st
+
+
+def derived_children(slug):
+    """この作品のテーマから派生した作品（新しい順）。元の作品の記録は書き換えないので、派生先の derived_from から数える。"""
+    out = []
+    if WORKS.exists():
+        for d in WORKS.iterdir():
+            f = d / "studio.json"
+            if f.exists():
+                try:
+                    df = json.loads(f.read_text(encoding="utf-8")).get("derived_from") or {}
+                except ValueError:
+                    continue
+                if df.get("slug") == slug:
+                    out.append({"slug": d.name, "at": df.get("at"), "changed": df.get("changed", [])})
+    return sorted(out, key=lambda x: x["at"] or "", reverse=True)
 
 
 def change_theme(slug, theme):
@@ -198,7 +258,8 @@ def _call_json(slug, stage, model, text, check, temperature=0.7, note="", reason
     last = None
     for attempt in (1, 2):
         try:
-            raw, rec = llm.chat(model, text, temperature=temperature, reasoning=reasoning, max_tokens=max_tokens)
+            raw, rec = llm.chat(model, text, temperature=temperature, reasoning=reasoning, max_tokens=max_tokens,
+                                session=f"novel-studio-{slug}")
         except llm.LLMError as e:
             raise StudioError(f"{model}: {e}")
         record_cost(slug, stage, rec, note)
@@ -593,9 +654,11 @@ def cover_args(a):
 
 
 def tools_outdated(slug):
-    """作品フォルダの道具が、表紙（v1.1）と rescue のモデル選択（v1.1）より前の版か。"""
+    """作品フォルダの道具が、表紙（v1.1）・rescue のモデル選択（v1.1）・OpenCode の窓口（v1.1.1）より前の版か。"""
     t = wdir(slug) / "tools"
-    return not (t / "make_cover.py").exists() or "NOVEL_MODEL_OVERRIDE" not in (t / "novelctl.py").read_text(encoding="utf-8")
+    wire = t / "llm_wire.py"
+    return (not (t / "make_cover.py").exists() or "NOVEL_MODEL_OVERRIDE" not in (t / "novelctl.py").read_text(encoding="utf-8")
+            or not wire.exists() or "x-opencode-session" not in wire.read_text(encoding="utf-8"))
 
 
 def upgrade_tools(slug):
@@ -674,7 +737,8 @@ def stage_of(st, d=None):
 def snapshot(slug):
     """画面に渡す状態一式。"""
     st = load(slug)
-    out = {**st, "stage": stage_of(st), "costs": costs(slug), "avoid": avoid_list(st)}
+    out = {**st, "stage": stage_of(st), "costs": costs(slug), "avoid": avoid_list(st),
+           "derived": derived_children(slug), "suggest_slug": suggest_slug(slug)}
     for b in out["briefs"]:
         b["lint"] = scaffold.lint(b["brief"])
     if st.get("fixed"):
