@@ -86,7 +86,7 @@ class EndToEnd(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.port = free_port()
-        env = dict(os.environ, MOCK_FAIL_CHAPTER="2")
+        env = dict(os.environ, MOCK_FAIL_CHAPTER="2", MOCK_RESCUE_FAIL_MODEL="anthropic/claude-opus-5.5")
         cls.mock = subprocess.Popen([PY, str(REPO / "studio" / "devtools" / "mock_openrouter.py"), "--port", str(cls.port)],
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
         time.sleep(0.8)
@@ -116,12 +116,24 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("承認", self.ctl(work, "approve-canon", env=dict(self.env, NOVEL_STUDIO_APPROVE=fp)).stdout)
         out = self.ctl(work, "run")
         self.assertIn("CHAPTER_EXHAUSTED", out.stdout)  # 第2章は偽モデルの審査で落ち続ける
+        # 指定の上位モデル（opus）で直しても通らない → 別のモデルを選んで直す（v1.1）
         self.assertEqual(self.ctl(work, "rescue", "chapter", "2").returncode, 0)
+        out = self.ctl(work, "run")
+        self.assertIn("CHAPTER_EXHAUSTED", out.stdout)
+        self.assertIn("--model", out.stdout)
+        self.assertEqual(self.ctl(work, "rescue", "chapter", "2", "--model", "openai/gpt-6-luna-pro", "--note", "棚の番号は表どおり").returncode, 0)
+        self.assertIn("棚の番号は表どおり", (work / "work" / "rescue-chapter_ch02.packet.md").read_text(encoding="utf-8"))
+        self.assertNotEqual(self.ctl(work, "rescue", "chapter", "2", "--model", "bad model!").returncode, 0)
         out = self.ctl(work, "run")
         self.assertEqual(out.returncode, 3, out.stdout[-800:])
         st = json.loads(self.ctl(work, "status", "--json").stdout)
         self.assertEqual(st["phase"], "done")
-        self.assertEqual(st["rescues"], 1)
+        self.assertEqual(st["rescues"], 2)
+        hist = next(c for c in st["chapters"] if c["n"] == 2)["rescues"]
+        self.assertEqual([h["model"] for h in hist], ["anthropic/claude-opus-5.5", "openai/gpt-6-luna-pro"])
+        self.assertTrue(hist[0]["result"].startswith("審査で不合格") and hist[1]["result"] == "合格")
+        used = [json.loads(x)["model"] for x in (work / "logs" / "usage.jsonl").read_text(encoding="utf-8").splitlines() if '"premium"' in x]
+        self.assertIn("openai/gpt-6-luna-pro", used)
         self.assertGreater(st["usage"]["total_usd"], 0)
         self.assertIn("premium", st["usage"]["by_role"])
         self.assertEqual(self.ctl(work, "proofread").returncode, 0)

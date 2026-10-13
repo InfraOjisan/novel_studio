@@ -544,8 +544,8 @@ ENGINE_ACTIONS = {
     "start": lambda a: ["start"],
     "step": lambda a: ["step"],
     "redesign": lambda a: ["redesign", "--feedback", a["feedback"]],
-    "rescue_canon": lambda a: ["rescue", "canon"],
-    "rescue_chapter": lambda a: ["rescue", "chapter", str(int(a["n"]))],
+    "rescue_canon": lambda a: ["rescue", "canon"] + rescue_opts(a),
+    "rescue_chapter": lambda a: ["rescue", "chapter", str(int(a["n"]))] + rescue_opts(a),
     "resolve": lambda a: ["resolve"] + [f"--{x}" for x in a.get("flags", []) if x in ("retry", "accept", "relock", "done", "ledger-done")],
     "reset_chapter": lambda a: ["reset-chapter", str(int(a["n"]))],
     "polish": lambda a: ["start", "polish"],
@@ -554,6 +554,23 @@ ENGINE_ACTIONS = {
     "epub": lambda a: ["epub"] + (["--proofread"] if a.get("proofread") else []),
     "cover": lambda a: cover_args(a),
 }
+
+MODEL_ID = re.compile(r"^[A-Za-z0-9_.:/\-]{3,120}$")
+
+
+def rescue_opts(a):
+    """上位モデルの例外処理の追加の指定：人が選んだモデル（指定の上位モデルで直らなかったとき）と、人の指示。"""
+    out = []
+    m = str(a.get("model") or "").strip()
+    if m:
+        if not MODEL_ID.match(m):
+            raise StudioError(f"モデル名が不正です：{m}")
+        out += ["--model", m]
+    note = str(a.get("note") or "").strip()
+    if note:
+        out += ["--note", note[:2000]]
+    return out
+
 
 COVER_STYLES = {"simple": "シンプル", "illust": "イラスト", "photo": "写実"}
 COVER_FONTS = {"mincho": "明朝", "gothic": "ゴシック", "casual": "カジュアル"}
@@ -575,6 +592,12 @@ def cover_args(a):
     return out
 
 
+def tools_outdated(slug):
+    """作品フォルダの道具が、表紙（v1.1）と rescue のモデル選択（v1.1）より前の版か。"""
+    t = wdir(slug) / "tools"
+    return not (t / "make_cover.py").exists() or "NOVEL_MODEL_OVERRIDE" not in (t / "novelctl.py").read_text(encoding="utf-8")
+
+
 def upgrade_tools(slug):
     return scaffold.upgrade(wdir(slug))
 
@@ -589,8 +612,8 @@ def engine_action(slug, action, args=None):
     if action == "upgrade":
         r = upgrade_tools(slug)
         return {"rc": 0 if r["ok"] else 2, "out": "道具を最新にしました：" + (", ".join(r.get("changed", [])) or "変更なし"), "err": "；".join(r.get("errors", []))}
-    if action == "cover" and not (wdir(slug) / "tools" / "make_cover.py").exists():
-        raise StudioError("この作品の道具は、表紙の機能より前の版です。表紙の欄の「道具を最新にする」を押してください")
+    if action in ("cover", "rescue_canon", "rescue_chapter") and tools_outdated(slug) and (action == "cover" or args.get("model") or args.get("note")):
+        raise StudioError("この作品の道具（tools/）は古い版です（表紙・モデルを選んだ手直しが使えません）。「道具を最新にする」を押してください")
     if action == "apply_proofread":
         d = wdir(slug)
         r = subprocess.run([sys.executable, "tools/proofread_apply.py"], cwd=d, capture_output=True, text=True)
@@ -663,5 +686,5 @@ def snapshot(slug):
         od = wdir(slug) / "output"
         out["outputs"] = sorted(p.name for p in od.iterdir()) if od.exists() else []
         out["cover"] = cover_info(slug)
-        out["tools_outdated"] = not (wdir(slug) / "tools" / "make_cover.py").exists()
+        out["tools_outdated"] = tools_outdated(slug)
     return out

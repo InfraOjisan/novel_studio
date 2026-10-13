@@ -128,6 +128,21 @@ def lint(b):
             W.append(f"{sid} は回収されません（持ち越し）。意図どおりなら問題なし")
     if not ids:
         E.append("伏線スロットが一つもありません")
+    # 伏線の詰め込みの警告（v1.1：短編で最終章に回収が集中し、上位モデルでも直しきれなかった実例から）
+    if n_ch and ids:
+        ops = {}
+        rec_last = 0
+        for s in b.get("slots") or []:
+            for c, ev in parse_plan(s.get("plan")):
+                ops[c] = ops.get(c, 0) + 1
+                if ev == "recovered" and c == n_ch:
+                    rec_last += 1
+        if rec_last >= 3:
+            W.append(f"最終章で回収が{rec_last}件あります。最終章が詰め込みになりやすい（2件までにして、残りは前の章で回収する）")
+        per_ch = max(2, t // 1000) if t else 2
+        for c, k in sorted(ops.items()):
+            if k > per_ch + 1:
+                W.append(f"第{c}章で伏線の操作が{k}件あります（1章 {t} 字なら {per_ch} 件前後が目安）。章を増やすか、スロットを減らす")
     for bn in b.get("banned") or []:
         try:
             re.compile(bn.get("pattern", ""))

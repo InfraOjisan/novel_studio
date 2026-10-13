@@ -16,8 +16,11 @@
   python3 tools/novelctl.py approve-canon   pause_after_canon=true のとき、CANON確認後に再開（人が端末で。studio はボタンで）
   python3 tools/novelctl.py redesign (--feedback TEXT | --feedback-file F)
                                             CANONに人の指示を足して設計をやり直す（設計中・承認待ちのときだけ）
-  python3 tools/novelctl.py rescue canon    上位モデル（premium）が CANON 全体を一度で直す（審査が収束しないとき）
-  python3 tools/novelctl.py rescue chapter N  上位モデルが第N章の指摘箇所を全体の整合を取りながら直す（3稿で通らないとき）
+  python3 tools/novelctl.py rescue canon [--model M] [--note T]
+                                            上位モデル（premium）が CANON 全体を一度で直す（審査が収束しないとき）
+  python3 tools/novelctl.py rescue chapter N [--model M] [--note T]
+                                            上位モデルが第N章の指摘箇所を全体の整合を取りながら直す（3稿で通らないとき、最終審査で落ちたとき）。
+                                            --model：その一回だけ別のモデルで（指定の上位モデルで直らなかったとき）。--note：人の指示を足す
   python3 tools/novelctl.py proofread [N...]  上位モデルが全章（または指定章）を校正し output/proofread_edits.json に修正案を出す
   python3 tools/novelctl.py resolve [--retry]  エスカレーションを解除（--retry で試行回数をリセット）
   python3 tools/novelctl.py reset-chapter N 第N章以降を未執筆に戻す（LEDGERも巻き戻す）
@@ -318,6 +321,8 @@ def build_packet(kind, n=None):
         fb = P("work", "canon_feedback.md")
         if fb.exists():
             s += sec("いま残っている指摘", rd(fb))
+        if RESCUE_NOTE.get("text"):
+            s += sec("プロデューサーの指示（最優先）", RESCUE_NOTE["text"])
         s += sec("依頼", fill(rd(P("prompts", "rescue_canon.md"))))
     elif kind == "rescue-chapter":
         s += sec("共通執筆ルール", rules())
@@ -332,6 +337,8 @@ def build_packet(kind, n=None):
         s += sec("まだ明かしてはいけないこと", hide_text(n))
         s += sec("いまの原稿", rd(P("work", f"ch{nn(n)}_draft.md")))
         s += sec("審査の指摘の履歴（稿ごと）", chapter_problem_history(n))
+        if RESCUE_NOTE.get("text"):
+            s += sec("プロデューサーの指示（最優先）", RESCUE_NOTE["text"])
         s += sec("依頼", fill(rd(P("prompts", "rescue_chapter.md")), n))
     elif kind == "proofread":
         s += sec("共通執筆ルール", rules())
@@ -390,7 +397,7 @@ def usage_summary():
     return out
 
 
-def call(packet, out, role_="writer"):
+def call(packet, out, role_="writer", model=None):
     budget = CFG.get("budget_usd")
     if budget and spent_usd() >= float(budget):
         raise Escalate("BUDGET_EXCEEDED", f"費用が予算 ${budget} に達しました（使用 ${spent_usd():.3f}）",
@@ -402,11 +409,14 @@ def call(packet, out, role_="writer"):
         cmd[0] = sys.executable
     env = os.environ.copy()
     env.update(CFG.get("call_env", {}))
+    env.pop("NOVEL_MODEL_OVERRIDE", None)
+    if model:
+        env["NOVEL_MODEL_OVERRIDE"] = model  # この一回だけ、役のモデルを差し替える（rescue で人が選んだモデル。v1.1）
     inflight = P("state", "inflight.json")
     env["NOVEL_PROGRESS_FILE"] = str(inflight)
     wr(inflight, json.dumps({"task": Path(packet).name, "started": time.time(), "last_recv": time.time(),
                              "reasoning_chars": 0, "content_chars": 0, "attempt": 1}))
-    log(f"CALL {role_} {Path(packet).name} -> {Path(out).name}")
+    log(f"CALL {role_}{'(' + model + ')' if model else ''} {Path(packet).name} -> {Path(out).name}")
     with open(packet, encoding="utf-8") as f:
         try:
             r = subprocess.run(cmd, stdin=None if use_arg else f, capture_output=True, text=True,
@@ -622,7 +632,8 @@ def step_design(p):
         if a >= CFG["max_design_attempts"]:
             raise Escalate("DESIGN_EXHAUSTED", f"CANONの設計が{a}回失敗",
                            "work/canon_feedback.md を読み、人が選ぶ：`rescue canon`（上位モデルで一度だけ全体修正）／"
-                           "`redesign --feedback ...`（人の指示で再設計）／CANON を読んで良しとするなら `approve-canon`")
+                           "`redesign --feedback ...`（人の指示で再設計）／CANON を読んで良しとするなら `approve-canon`。"
+                           "上位モデルで直らなかったら `rescue canon --model <別のモデル>`")
         pk = build_packet("design")
         raw = call(pk, P("work", f"design_a{a + 1}.out"))
         m = re.search(r"^#\s*CANON.*", raw, flags=re.M | re.S)
@@ -650,6 +661,8 @@ def step_design(p):
             return "審査結果のJSONを読めなかった → 審査をやり直す"
     high = [i for i in j.get("issues", []) if i.get("severity") == "high"]
     if j.get("pass") and not high:
+        if p.get("canon_rescues") and p["canon_rescues"][-1].get("result") == "審査待ち":
+            p["canon_rescues"][-1]["result"] = "合格"
         p["canon_sha256"] = sha(CANON)
         p["phase"] = "canon_hold" if CFG["pause_after_canon"] else "chapters"
         wr(P("work", "canon_review_notes.md"), json.dumps(j, ensure_ascii=False, indent=2))
@@ -657,6 +670,8 @@ def step_design(p):
         return "CANONが審査を通過し、ロックしました" + ("（人の確認待ち：`approve-canon`）" if CFG["pause_after_canon"] else " → 第1章へ")
     fb = "\n".join(f"- [審査項目{i.get('item')}] {i.get('detail')} → {i.get('fix')}" for i in high)
     wr(P("work", "canon_feedback.md"), fb)
+    if p.get("canon_rescues") and p["canon_rescues"][-1].get("result") == "審査待ち":
+        p["canon_rescues"][-1]["result"] = f"審査で不合格（high {len(high)}件）"
     p["design_state"] = "draft"
     log(f"CANON review fail: {len(high)} high")
     return f"CANON審査不合格（high {len(high)}件）→ 修正設計"
@@ -751,8 +766,12 @@ def step_chapter(p):
         wr(P("work", f"ch{nn(n)}_verdict_a{ch['attempts']}.json"),
            json.dumps({"chars": c, "mech": mech, "review": review, "problems": problems}, ensure_ascii=False, indent=2))
         if not problems:
+            if ch.get("rescues") and ch["rescues"][-1].get("result") == "審査待ち":
+                ch["rescues"][-1]["result"] = "合格"
             return accept(p, n, f"第{n}章 合格（{c}字）" + (f"／軽微な指摘{len(lows)}件は記録のみ" if lows else ""))
         wr(fb, "\n".join(f"- {x}" for x in problems))
+        if ch.get("rescued") and ch.get("rescues"):
+            ch["rescues"][-1]["result"] = "審査で不合格：" + " / ".join(problems[:2])[:200]
         if ch["attempts"] >= CFG["max_attempts"] or ch.get("rescued"):
             soft_only = all(x.startswith(("[short]", "[long]")) for x in problems)
             if soft_only:
@@ -760,7 +779,8 @@ def step_chapter(p):
                 return accept(p, n, f"第{n}章 字数のみ範囲外（{c}字）で採用")
             raise Escalate("CHAPTER_EXHAUSTED", f"第{n}章が{ch['attempts']}稿で合格しない: " + " / ".join(problems[:3]),
                            f"work/ch{nn(n)}_feedback.md と work/ch{nn(n)}_verdict_a*.json を確認。" +
-                           ("上位モデルで直しても通らなかった。人が原稿を読み、良ければ `resolve --accept`、" if ch.get("rescued") else
+                           (f"上位モデル（{', '.join(r['model'] for r in ch.get('rescues', []))}）で直しても通らなかった。"
+                            f"別のモデルで `rescue chapter {n} --model <モデル> [--note 指示]`／" if ch.get("rescued") else
                             f"人が選ぶ：`rescue chapter {n}`（上位モデルで指摘箇所を一度だけ修正）／`resolve --retry`（書き手にもう3稿）／") +
                            "原稿のままで良ければ `resolve --accept`")
         ch["state"] = "rewrite"
@@ -804,11 +824,13 @@ def write_ledger_section(n, block):
 def finish_chapter(p, n):
     p["chapters"][str(n)]["state"] = "done"
     log(f"CH{nn(n)} done")
-    if n >= N_CH:
+    # 最終審査のあとで直した章なら、まだ終わっていない次の章へ（なければ最終工程へ）。v1.1
+    nxt = next((i for i in range(n + 1, N_CH + 1) if p["chapters"][str(i)]["state"] != "done"), None)
+    if nxt is None:
         p["phase"], p["final_state"] = "final", "assemble"
         return f"第{n}章 LEDGER記録完了 → 全章そろった。最終工程へ"
-    p["current"] = n + 1
-    return f"第{n}章 LEDGER記録完了 → 第{n + 1}章へ"
+    p["current"] = nxt
+    return f"第{n}章 LEDGER記録完了 → 第{nxt}章へ"
 
 
 def cmd_assemble(quiet=False, polished=False):
@@ -876,6 +898,7 @@ def step_final(p):
         p["phase"], p["current"] = "chapters", N_CH
         return f"最終審査で第{N_CH}章に重大な指摘 → 第{N_CH}章を一度だけ書き直す"
     raise Escalate("FINAL_REVIEW_FAILED", "最終審査で重大な指摘あり（output/final_report.md 参照）",
+                   "上位モデルで直すなら `rescue chapter N [--model M] [--note 指示]`（最終審査の指摘を修正指示にする）、"
                    "該当章を `reset-chapter N` で巻き戻すか、原稿のまま完成とするなら `resolve --done`")
 
 
@@ -1202,11 +1225,49 @@ def proof_source(n):
     return f if f.exists() else P("chapters", f"ch{nn(n)}.md")
 
 
+RESCUE_NOTE = {}
+MODEL_RE = re.compile(r"^[A-Za-z0-9_.:/\-]{3,120}$")
+
+
+def rescue_opts(args):
+    """rescue の追加の指定：--model M（この一回だけ使うモデル）、--note TEXT（人の指示）。"""
+    model = args[args.index("--model") + 1] if "--model" in args else None
+    note = args[args.index("--note") + 1] if "--note" in args else ""
+    if model and not MODEL_RE.match(model):
+        raise ValueError(f"モデル名が不正です：{model}")
+    return model, note.strip()
+
+
+def premium_model():
+    return (CFG["llm"]["profiles"].get("premium") or {}).get("model", "premium")
+
+
+def reopen_for_final(p, n):
+    """最終審査で落ちた章を、上位モデルで直せる状態に戻す（最終審査の指摘を修正指示にする）。"""
+    j = extract_json(rd(P("work", "final_review.out"))) if P("work", "final_review.out").exists() else {}
+    issues = [i for i in (j or {}).get("issues", []) if i.get("chapter") == n and i.get("severity") == "high"] or \
+             [i for i in (j or {}).get("issues", []) if i.get("chapter") == n]
+    wr(P("work", f"ch{nn(n)}_draft.md"), rd(P("chapters", f"ch{nn(n)}.md")))
+    wr(P("work", f"ch{nn(n)}_feedback.md"), "\n".join(f"- [最終審査] {i.get('detail')} → {i.get('fix')}" for i in issues) or "- [最終審査] output/final_report.md の指摘を直す")
+    ch = p["chapters"][str(n)]
+    ch.update({"state": "drafted", "ledger_attempts": 0})
+    p.update({"phase": "chapters", "current": n, "final_state": "assemble"})
+    log(f"REOPEN CH{nn(n)} for rescue after final review")
+
+
 def cmd_rescue(args):
-    """上位モデル（premium）を一回だけ呼ぶ例外処理。書くのではなく、止まったところを一度で直す。"""
+    """上位モデルを一回呼ぶ例外処理。書くのではなく、止まったところを一度で直す。
+    v1.1：--model で人がモデルを選べる（指定した上位モデルで直らなかったとき、別のモデルで）。--note で人の指示を足せる。"""
     if not args or args[0] not in ("canon", "chapter"):
-        print("usage: novelctl.py rescue canon | rescue chapter N")
+        print("usage: novelctl.py rescue canon [--model M] [--note T] | rescue chapter N [--model M] [--note T]")
         return 1
+    try:
+        model, note = rescue_opts(args)
+    except ValueError as e:
+        print(f"NG: {e}")
+        return 1
+    RESCUE_NOTE["text"] = note
+    used = model or premium_model()
     p = load()
     if args[0] == "canon":
         if p["phase"] not in ("design", "canon_hold"):
@@ -1216,9 +1277,10 @@ def cmd_rescue(args):
             print("REFUSED: canon/CANON.md がまだありません。")
             return 2
         a = p["design_attempts"]
+        k = len(p.setdefault("canon_rescues", [])) + 1
         pk = build_packet("rescue-canon")
         try:
-            raw = call(pk, P("work", f"rescue_canon_a{a}.out"), "premium")
+            raw = call(pk, P("work", f"rescue_canon_a{a}_r{k}.out"), "premium", model)
         except Escalate as e:
             print(f"ESCALATE [{e.code}] {e.detail}\n対応: {e.hint}")
             return 2
@@ -1226,46 +1288,61 @@ def cmd_rescue(args):
         text = re.sub(r"\n```\s*$", "", m.group(0)).strip() + "\n" if m else ""
         issues = canon_check(text) if text else ["出力が `# CANON` で始まっていない。"]
         if issues:
-            log(f"RESCUE canon fail: {issues}")
-            print("NG: 上位モデルの CANON が機械検査に通りません：" + " / ".join(issues[:5]))
+            p["canon_rescues"].append({"model": used, "result": "機械検査で不合格", "note": note[:200]})
+            save(p)
+            log(f"RESCUE canon ({used}) fail: {issues}")
+            print(f"NG: {used} の CANON が機械検査に通りません：" + " / ".join(issues[:5]) + "。別のモデルを --model で選べます。")
             return 2
-        shutil.copy(CANON, P("work", f"canon_before_rescue_a{a}.md"))
+        shutil.copy(CANON, P("work", f"canon_before_rescue_r{k}.md"))
         wr(CANON, text)
+        p["canon_rescues"].append({"model": used, "result": "審査待ち", "note": note[:200]})
         p.update({"phase": "design", "design_state": "review", "canon_sha256": None, "escalation": None})
         p["rescues"] = p.get("rescues", 0) + 1
         save(p)
-        log("RESCUE canon by premium → review")
-        print("OK: 上位モデルが CANON 全体を直しました（旧版は work/canon_before_rescue_*.md）→ 次は審査。start で続けます。")
+        log(f"RESCUE canon by {used} → review")
+        print(f"OK: {used} が CANON 全体を直しました（旧版は work/canon_before_rescue_r{k}.md）→ 次は審査。start で続けます。")
         return 0
-    n = int(args[1]) if len(args) > 1 else p["current"]
+    n = int(args[1]) if len(args) > 1 and args[1].isdigit() else p["current"]
+    esc = (p.get("escalation") or {}).get("code")
+    if p["phase"] == "final" and esc == "FINAL_REVIEW_FAILED" and 1 <= n <= N_CH:
+        reopen_for_final(p, n)
     ch = p["chapters"][str(n)]
     if p["phase"] != "chapters" or n != p["current"] or not P("work", f"ch{nn(n)}_draft.md").exists():
         print(f"REFUSED: 第{n}章はいま直せる状態ではありません（phase={p['phase']} current={p['current']}）。")
         return 2
+    hist = ch.setdefault("rescues", [])
+    k = len(hist) + 1
     pk = build_packet("rescue-chapter", n)
     try:
-        raw = call(pk, P("work", f"ch{nn(n)}_rescue_a{ch['attempts']}.out"), "premium")
+        raw = call(pk, P("work", f"ch{nn(n)}_rescue_r{k}.out"), "premium", model)
     except Escalate as e:
         print(f"ESCALATE [{e.code}] {e.detail}\n対応: {e.hint}")
         return 2
     text = extract_chapter(raw, n)
+    reason = None
     if not text:
-        print("NG: 上位モデルの出力に章見出しがありません。work/ の .out を見てください。")
-        return 2
-    c, mech = mech_check(text, n)
-    hard = [m for m in mech if m[0] in ("truncated", "meta", "format", "line", "copy")]
-    if hard:
-        print("NG: 機械検査に通りません：" + " / ".join(d for _, d in hard))
+        reason = "出力に章見出しがない"
+    else:
+        c, mech = mech_check(text, n)
+        hard = [m for m in mech if m[0] in ("truncated", "meta", "format", "line", "copy")]
+        if hard:
+            reason = "機械検査で不合格：" + " / ".join(d for _, d in hard)
+    if reason:
+        hist.append({"model": used, "result": reason, "note": note[:200]})
+        save(p)
+        log(f"RESCUE CH{nn(n)} ({used}) fail: {reason}")
+        print(f"NG: {used}：{reason}。別のモデルを --model で選べます。")
         return 2
     wr(P("work", f"ch{nn(n)}_draft.md"), text)
-    wr(P("work", f"ch{nn(n)}_draft_rescue.md"), text)
-    ch.update({"state": "drafted", "rescued": True, "parse_retries": 0})
-    ch.setdefault("warnings", []).append("上位モデルで指摘箇所を修正")
+    wr(P("work", f"ch{nn(n)}_draft_rescue_r{k}.md"), text)
+    hist.append({"model": used, "result": "審査待ち", "note": note[:200]})
+    ch.update({"state": "drafted", "rescued": True, "parse_retries": 0, "attempts": ch["attempts"] + 1})
+    ch.setdefault("warnings", []).append(f"上位モデル（{used}）で指摘箇所を修正")
     p["escalation"] = None
     p["rescues"] = p.get("rescues", 0) + 1
     save(p)
-    log(f"RESCUE CH{nn(n)} by premium → review once")
-    print(f"OK: 第{n}章を上位モデルが直しました（{c}字）→ 審査を一度だけ通します。通らなければ人の判断（resolve --accept）。")
+    log(f"RESCUE CH{nn(n)} by {used} → review once")
+    print(f"OK: 第{n}章を {used} が直しました（{c}字）→ 審査を一度だけ通します。通らなければ、別のモデルでもう一度か、人の判断（resolve --accept）。")
     return 0
 
 
@@ -1354,12 +1431,13 @@ def status_dict():
          "design": {"state": p["design_state"], "attempts": p["design_attempts"], "max": CFG["max_design_attempts"]},
          "chapters": [], "slots": {}, "escalation": p.get("escalation"), "rescues": p.get("rescues", 0),
          "running": bool(lock_owner()), "inflight": None, "usage": usage_summary(),
-         "budget_usd": CFG.get("budget_usd"), "canon_fp": sha(CANON)[:8] if CANON.exists() else None}
+         "budget_usd": CFG.get("budget_usd"), "premium_model": premium_model(), "canon_rescues": p.get("canon_rescues", []), "canon_fp": sha(CANON)[:8] if CANON.exists() else None}
     for k, v in p["chapters"].items():
         f = P("chapters", f"ch{nn(k)}.md")
         d["chapters"].append({"n": int(k), "state": v["state"], "attempts": v["attempts"],
                               "chars": count_chars(chapter_body(rd(f))) if f.exists() else 0,
-                              "warnings": v.get("warnings", []), "rescued": bool(v.get("rescued"))})
+                              "warnings": v.get("warnings", []), "rescued": bool(v.get("rescued")),
+                              "rescues": v.get("rescues", [])})
     if LEDGER.exists():
         _, secs = ledger_sections(rd(LEDGER))
         for c in sorted(secs):

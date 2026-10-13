@@ -26,8 +26,8 @@ novel_studio v1.0 の道具は、すべて「JSON を入れて JSON を出す」
 | `engine <slug> start` | — | `status` | 執筆エンジンを切り離して起動 | 多数（安いモデル） | 許可 |
 | `engine <slug> step` | — | `status` | 1段だけ進める（同期） | 1〜2回 | 許可 |
 | `engine <slug> redesign --feedback T` | — | `status` | 人の指示で CANON を再設計 | — | **確認** |
-| `engine <slug> rescue_canon` | — | `status` | 上位モデルが CANON 全体を一度だけ直す | 1回（上位・高い） | **確認** |
-| `engine <slug> rescue_chapter --ch N` | — | `status` | 上位モデルが第N章の指摘箇所を直す | 1回（上位・高い） | **確認** |
+| `engine <slug> rescue_canon [--model M] [--note T]` | — | `status` | 上位モデル（または人が選んだモデル）が CANON 全体を一度だけ直す | 1回（上位・高い） | **確認** |
+| `engine <slug> rescue_chapter --ch N [--model M] [--note T]` | — | `status` | 上位モデル（または人が選んだモデル）が第N章の指摘箇所を直す。最終審査で落ちた章にも使える | 1回（上位・高い） | **確認** |
 | `engine <slug> resolve --flags retry/accept/done/ledger-done/relock` | — | `status` | 止まりを解く | なし | **確認**（accept/done/relock は人だけ） |
 | `engine <slug> reset_chapter --ch N` | — | `status` | 第N章以降を書き直しに戻す | なし | 禁止（人だけ） |
 | `engine <slug> polish` | — | `status` | 文体の磨き（任意） | 章の数 | 確認 |

@@ -191,6 +191,10 @@ def build_body(role, task, text):
     env_roles = LLM.get("model_env_roles")
     if LLM.get("model_env") and env_value(LLM["model_env"]) and (env_roles is None or role in env_roles):
         prof["model"] = env_value(LLM["model_env"])
+    override = os.environ.get("NOVEL_MODEL_OVERRIDE")
+    if override:  # novelctl rescue --model：この一回だけ、人が選んだモデルで（予備のモデルには切り替えない）
+        prof["model"] = override
+        prof.pop("fallback_models", None)
     body = {
         "model": prof["model"],
         "messages": [{"role": "system", "content": prof["system"]}, {"role": "user", "content": text}],

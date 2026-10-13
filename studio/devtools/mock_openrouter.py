@@ -10,6 +10,8 @@
 環境変数:
   MOCK_FAIL_CANON_REVIEW=N   CANON 審査を最初の N 回だけ不合格にする（設計のやり直しの経路を通すため）
   MOCK_FAIL_CHAPTER=K        第K章の審査を毎回不合格にする（CHAPTER_EXHAUSTED → rescue の経路を通すため。rescue 後は合格）
+  MOCK_FAIL_FINAL=K          最終審査で第K章に重大な指摘を出し続ける（第K章を上位モデルで直すまで）
+  MOCK_RESCUE_FAIL_MODEL=M   このモデル（カンマ区切り）で rescue した章は、審査に通らないままにする（別のモデルを選ぶ経路を通すため）
   MOCK_DELAY=秒              1回の応答を遅らせる（進み具合の表示を見るため）
 
 ハーネスの試験（harness/exams）でも、費用をかけずに進行役の振る舞いだけを見るのに使える。
@@ -90,7 +92,7 @@ def slot_events(text, header):
     return ev
 
 
-def engine_answer(task, ch, text):
+def engine_answer(task, ch, text, model=""):
     if task == "design":
         prev = section(text, "前回のCANON")
         if prev:
@@ -113,8 +115,9 @@ def engine_answer(task, ch, text):
         return json.dumps({"pass": True, "issues": [{"severity": "low", "item": 12, "detail": "不変条件の言い回しが硬い（偽モデル）", "fix": "任意"}]}, ensure_ascii=False)
     if task in ("write", "rescue-chapter", "polish"):
         if task == "rescue-chapter":
-            with LOCK:
-                STATE["rescued"].add(ch)
+            if model not in os.environ.get("MOCK_RESCUE_FAIL_MODEL", "").split(","):  # このモデルの手直しは審査に通らない
+                with LOCK:
+                    STATE["rescued"].add(ch)
             return section(text, "いまの原稿")
         if task == "polish":
             return section(text, f"磨く原稿（第{ch}章）")
@@ -146,6 +149,10 @@ def engine_answer(task, ch, text):
                 out.append(f"{f}: 第{ch}章の{f}（偽モデル）")
         return "\n".join(out)
     if task == "final":
+        ff = os.environ.get("MOCK_FAIL_FINAL")
+        if ff and int(ff) not in STATE["rescued"]:
+            return json.dumps({"pass": False, "issues": [{"severity": "high", "chapter": int(ff), "detail": "伏線F1の回収が駆け足で、設置の場面と結びついていない（偽モデル）", "fix": "設置の場面の小道具を回収の場面で呼び戻す"}],
+                               "carry_over": [], "summary": "最終章が苦しい（偽モデル）"}, ensure_ascii=False)
         return json.dumps({"pass": True, "issues": [], "carry_over": [], "summary": "偽モデルの講評：全章そろっている。"}, ensure_ascii=False)
     if task == "rescue-canon":
         return section(text, "いまのCANON")
@@ -269,7 +276,7 @@ class H(BaseHTTPRequestHandler):
         m = re.match(r"<!-- TASK: (\S+)(?: CH=(\d+))?", text)
         s = re.search(r"<!-- STUDIO: (\S+) -->", text)
         if m:
-            out = engine_answer(m.group(1), int(m.group(2) or 0), text)
+            out = engine_answer(m.group(1), int(m.group(2) or 0), text, model)
         elif s:
             out = studio_answer(s.group(1), text, model)
         else:

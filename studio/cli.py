@@ -19,6 +19,7 @@
   python3 studio/cli.py brief-show <slug> <V> [--markdown]
   python3 studio/cli.py fix <slug> <V> [--roles roles.json] [--budget 3]
   python3 studio/cli.py engine <slug> <action> [--ch N] [--feedback "..."] [--flags retry,accept] [--chapters 1,2]
+        rescue_canon / rescue_chapter は [--model M]（この一回だけ別のモデルで）と [--note "指示"] も取る
         action = start | step | redesign | rescue_canon | rescue_chapter | resolve | reset_chapter | polish | proofread | assemble | epub | apply_proofread | cover
   python3 studio/cli.py engine <slug> cover [--model M|none] [--style simple|illust|photo] [--motif "..."]
         [--title-dir vertical|horizontal] [--font mincho|gothic|casual] [--author "..."] [--reuse-art]
@@ -96,6 +97,7 @@ def main(argv):
     ap.add_argument("--font")
     ap.add_argument("--author", default="")
     ap.add_argument("--reuse-art", dest="reuse_art", action="store_true")
+    ap.add_argument("--note", default="")
     a = ap.parse_args(argv)
     A = a.args
     try:
@@ -144,7 +146,7 @@ def main(argv):
             args = {"n": a.ch, "feedback": a.feedback or "", "flags": [x for x in a.flags.split(",") if x],
                     "chapters": [int(x) for x in a.chapters.split(",") if x],
                     "model": a.model, "style": a.style, "motif": a.motif, "title_dir": a.title_dir, "font": a.font,
-                    "author": a.author, "reuse_art": a.reuse_art}
+                    "author": a.author, "reuse_art": a.reuse_art, "note": a.note}
             r = core.engine_action(A[0], A[1], args)
             st = core.engine_status(A[0])
             return out({**r, "status": {k: st.get(k) for k in ("phase", "current", "escalation", "next", "running", "usage")}},
