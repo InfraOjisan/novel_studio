@@ -6,6 +6,7 @@ cost が返らないプロバイダのときは、/models の単価から計算�
 """
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -59,7 +60,9 @@ def models(refresh=False):
     CACHE.mkdir(exist_ok=True)
     f = CACHE / f"models_{_base_tag()}.json"
     if f.exists() and not refresh and time.time() - f.stat().st_mtime < 86400:
-        return json.loads(f.read_text(encoding="utf-8"))
+        cached = _read_cache(f)
+        if cached is not None:
+            return cached
     try:
         with urllib.request.urlopen(urllib.request.Request(base_url() + "/models", headers={"User-Agent": wire.UA}), timeout=20) as r:
             data = json.loads(r.read().decode("utf-8")).get("data", [])
@@ -75,12 +78,10 @@ def models(refresh=False):
             out.append({"id": m["id"], "name": m.get("name", m["id"]), "in_per_m": round(pin, 4), "out_per_m": round(pout, 4),
                         "context": m.get("context_length")})
         out.sort(key=lambda x: x["id"])
-        f.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+        _write_cache(f, out)
         return out
     except (urllib.error.URLError, OSError, ValueError, KeyError):
-        if f.exists():
-            return json.loads(f.read_text(encoding="utf-8"))
-        return []
+        return _read_cache(f) or []
 
 
 def image_models(refresh=False):
@@ -88,7 +89,9 @@ def image_models(refresh=False):
     CACHE.mkdir(exist_ok=True)
     f = CACHE / f"image_models_{_base_tag()}.json"
     if f.exists() and not refresh and time.time() - f.stat().st_mtime < 86400:
-        return json.loads(f.read_text(encoding="utf-8"))
+        cached = _read_cache(f)
+        if cached is not None:
+            return cached
     for path in ("/images/models", "/models?output_modalities=image"):
         try:
             with urllib.request.urlopen(urllib.request.Request(base_url() + path, headers={"User-Agent": wire.UA}), timeout=20) as r:
@@ -105,9 +108,24 @@ def image_models(refresh=False):
             out.append({"id": m["id"], "name": m.get("name", m["id"]), "price": str(price)})
         if out:
             out.sort(key=lambda x: x["id"])
-            f.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+            _write_cache(f, out)
             return out
-    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else []
+    return _read_cache(f) or []
+
+
+def _write_cache(f, data):
+    """並列の提案（モデルごとのスレッド）が同時に読み書きするので、書きかけを読ませない：別名に書いてから差し替える。"""
+    tmp = f.with_name(f"{f.stem}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(f)
+
+
+def _read_cache(f):
+    """キャッシュが無い・壊れている（古い版が書きかけで残した）ときは None。"""
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def price_of(model):
