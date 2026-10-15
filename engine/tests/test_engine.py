@@ -332,5 +332,50 @@ class Derive(unittest.TestCase):
             c.create_work("stray", {})  # 中身のあるフォルダには作らない
 
 
+class ModelsCache(unittest.TestCase):
+    """モデル一覧のキャッシュ（studio/.cache）：並列の提案が同時に読み書きしても、壊れたキャッシュが残っていても落ちないこと。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.port = free_port()
+        cls.mock = subprocess.Popen([PY, str(REPO / "studio" / "devtools" / "mock_openrouter.py"), "--port", str(cls.port)],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.8)
+        cls.saved = os.environ.get("NOVEL_LLM_BASE_URL")
+        os.environ["NOVEL_LLM_BASE_URL"] = f"http://127.0.0.1:{cls.port}/api/v1"
+        import llm
+        cls.llm = llm
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.mock.terminate()
+        cls.mock.wait()
+        if cls.saved is None:
+            os.environ.pop("NOVEL_LLM_BASE_URL", None)
+        else:
+            os.environ["NOVEL_LLM_BASE_URL"] = cls.saved
+        for f in cls.llm.CACHE.glob(f"*models_{cls.llm._base_tag()}*"):
+            f.unlink(missing_ok=True)
+
+    def test_broken_cache_is_refetched(self):
+        llm = self.llm
+        llm.CACHE.mkdir(exist_ok=True)
+        f = llm.CACHE / f"models_{llm._base_tag()}.json"
+        f.write_text('[{"id": "anthropic/claude', encoding="utf-8")  # 書きかけのまま残ったキャッシュ
+        self.assertIn("anthropic/claude-haiku-5.5", [m["id"] for m in llm.models()])
+        self.assertTrue(json.loads(f.read_text(encoding="utf-8")))
+
+    def test_parallel_read_write(self):
+        import concurrent.futures as cf
+        llm = self.llm
+
+        def one(i):
+            return llm.models(refresh=(i % 2 == 0))
+        with cf.ThreadPoolExecutor(max_workers=12) as ex:
+            res = list(ex.map(one, range(60)))
+        self.assertTrue(all(r for r in res))
+        self.assertEqual(list(llm.CACHE.glob("*.tmp")), [])  # 書きかけの別名が残らない
+
+
 if __name__ == "__main__":
     unittest.main()
