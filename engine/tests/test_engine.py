@@ -377,5 +377,90 @@ class ModelsCache(unittest.TestCase):
         self.assertEqual(list(llm.CACHE.glob("*.tmp")), [])  # 書きかけの別名が残らない
 
 
+class ChunkedClassify(unittest.TestCase):
+    """8案を分析しても上流で落ちないこと：骨格は小分けに頼み、落ちたら1案ずつに分け、取れた分から保存する。選んだ案だけを分析・書き出す。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.port = free_port()
+        env = dict(os.environ, MOCK_SKELETON_MAX="1", MOCK_FAIL_SKELETON="P05")  # 2案以上の依頼は「上流が諦める」。P05 はいつも失敗
+        cls.mock = subprocess.Popen([PY, str(REPO / "studio" / "devtools" / "mock_openrouter.py"), "--port", str(cls.port)], env=env,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.8)
+        cls.saved_env = {k: os.environ.get(k) for k in ("NOVEL_LLM_BASE_URL", "NOVEL_PROVIDER_APIKEY", "NOVEL_LLM_PROTOCOLS")}
+        os.environ.update(NOVEL_LLM_BASE_URL=f"http://127.0.0.1:{cls.port}/api/v1", NOVEL_PROVIDER_APIKEY="mock")
+        os.environ.pop("NOVEL_LLM_PROTOCOLS", None)
+        import core
+        cls.core = core
+        cls.saved = core.WORKS
+        core.WORKS = Path(tempfile.mkdtemp(prefix="novel-chunk-"))
+        core.create_work("many", {"genre": "SF", "theme": "氷の月"})
+        core.propose("many", ["anthropic/claude-haiku-5.5", "openai/gpt-6-luna-pro", "deepseek/deepseek-v4.1-flash", "qwen/qwen3.8-flash"], n=2)
+        assert len(core.load("many")["proposals"]) == 8
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.mock.terminate()
+        cls.mock.wait()
+        shutil.rmtree(cls.core.WORKS, ignore_errors=True)
+        cls.core.WORKS = cls.saved
+        for k, v in cls.saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def skeleton_calls(self):
+        f = self.core.WORKS / "many" / "studio" / "usage.jsonl"
+        return [json.loads(x) for x in f.read_text().splitlines() if json.loads(x)["stage"] == "skeleton"]
+
+    def test_1_split_and_keep(self):
+        c = self.core
+        seen = []
+        r = c.classify("many", progress=lambda d, t, w="": seen.append((d, t)))
+        self.assertEqual(r["missing"], ["P05"])
+        self.assertEqual(len(r["ids"]), 7)
+        self.assertNotIn("P05", r["labels"])
+        calls = self.skeleton_calls()
+        self.assertEqual(len(calls), 7)  # 3案ずつの依頼はすべて落ち、1案ずつで7案取れた
+        self.assertTrue(all("," not in u["note"] for u in calls))
+        self.assertEqual(seen[-1], (7, 8))
+        self.assertEqual(sorted(c.load("many")["skeletons"]), ["P01", "P02", "P03", "P04", "P06", "P07", "P08"])
+
+    def test_2_selected_only_and_cached(self):
+        c = self.core
+        before = len(self.skeleton_calls())
+        r = c.classify("many", ids=["P01", "P02", "P07"])
+        self.assertEqual(set(r["labels"]), {"P01", "P02", "P07"})
+        self.assertEqual(len(self.skeleton_calls()), before)  # 抜き出し済みの骨格は使い回す
+        self.assertEqual(set(c.reclassify("many", 0.3)["labels"]), {"P01", "P02", "P07"})
+        with self.assertRaises(c.StudioError):
+            c.classify("many", ids=["P01"])
+
+    def test_3_ai_reads_skeletons_only(self):
+        c = self.core
+        st = c.load("many")
+        props = [st["proposals"][i] for i in ("P01", "P02")]
+        block = c._skeleton_block(props, c.skeleton_store(st))
+        self.assertNotIn(props[0]["synopsis"][:30], block)
+        self.assertIn("one_line", block)
+        r = c.classify("many", ids=["P01", "P02", "P03", "P04"], method="both")
+        self.assertEqual(set(r["ai"]["labels"]), {"P01", "P02", "P03", "P04"})
+
+    def test_4_export(self):
+        import csv
+        import io
+        c = self.core
+        name, data, _ = c.export_proposals("many", ["P01", "P03", "P05"], "csv")
+        text = data.decode("utf-8")
+        self.assertTrue(text.startswith("\ufeff案,"))
+        rows = list(csv.reader(io.StringIO(text.lstrip("\ufeff"))))
+        self.assertEqual([r[0] for r in rows[1:]], ["P01", "P03", "P05"])
+        md = c.export_proposals("many", ["P01", "P03"], "md")[1].decode()
+        self.assertIn("| P01 |", md)
+        self.assertIn("### あらすじ", md)
+        self.assertEqual(len(json.loads(c.export_proposals("many", [], "json")[1])["proposals"]), 8)
+
+
 if __name__ == "__main__":
     unittest.main()

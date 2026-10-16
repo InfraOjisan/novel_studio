@@ -12,7 +12,9 @@
   python3 studio/cli.py propose <slug> --models m1,m2 [--n 2] [--mode new|resubmit|rolling] [--instruction "..."] [--temperature 0.8]
   python3 studio/cli.py edit <slug> <pid> --fields fields.json  人（または進行役）が案を直す。新しい案として足される
   python3 studio/cli.py revise <slug> <pid> --model m --instruction "..."
-  python3 studio/cli.py classify <slug> [--method tool|ai|both] [--model m] [--threshold 0.5] [--refresh]
+  python3 studio/cli.py classify <slug> [--ids P01,P03,...] [--method tool|ai|both] [--model m] [--threshold 0.5] [--refresh]
+        骨格は小分け（settings の skeleton_batch 案ずつ、skeleton_parallel 本まで同時）に抜き出し、取れた分から保存する
+  python3 studio/cli.py export-proposals <slug> [--ids P01,P03,...] [--fmt md|csv|json] [--out path]   案をまとめて書き出す（見比べる用）
   python3 studio/cli.py reclassify <slug> --threshold 0.45     骨格は使い回し、しきい値だけ変える（モデルを呼ばない）
   python3 studio/cli.py select <slug> <pid>
   python3 studio/cli.py brief <slug> [--model m] [--instruction "..."] [--base V]
@@ -99,6 +101,9 @@ def main(argv):
     ap.add_argument("--author", default="")
     ap.add_argument("--reuse-art", dest="reuse_art", action="store_true")
     ap.add_argument("--note", default="")
+    ap.add_argument("--ids", default="")
+    ap.add_argument("--fmt", default="md")
+    ap.add_argument("--out")
     a = ap.parse_args(argv)
     A = a.args
     try:
@@ -123,8 +128,16 @@ def main(argv):
         if a.cmd == "revise":
             return out({"pid": core.revise_proposal(A[0], A[1], a.model or core.settings()["skeleton_model"], a.instruction)})
         if a.cmd == "classify":
-            r = core.classify(A[0], a.model, a.method, a.threshold, refresh_skeletons=a.refresh)
-            return out({k: r.get(k) for k in ("labels", "clusters", "mean_similarity", "top_pairs", "ai")})
+            ids = [x for x in a.ids.split(",") if x] or None
+            r = core.classify(A[0], a.model, a.method, a.threshold, refresh_skeletons=a.refresh, ids=ids,
+                              progress=lambda d, t, w="": print(f"{w} {d}/{t}", file=sys.stderr, flush=True))
+            return out({k: r.get(k) for k in ("ids", "labels", "clusters", "mean_similarity", "top_pairs", "ai", "missing", "errors")},
+                       0 if not r.get("missing") else 2)
+        if a.cmd == "export-proposals":
+            name, data, _ = core.export_proposals(A[0], [x for x in a.ids.split(",") if x], a.fmt)
+            p = Path(a.out or name)
+            p.write_bytes(data)
+            return out({"file": str(p), "bytes": len(data)})
         if a.cmd == "reclassify":
             r = core.reclassify(A[0], a.threshold)
             return out({k: r.get(k) for k in ("labels", "clusters", "mean_similarity")})
