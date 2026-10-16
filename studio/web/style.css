@@ -234,3 +234,13 @@ label.f.check > span:first-child { display: flex; gap: 8px; align-items: center;
   .actionbar { margin: 20px -16px -60px; padding: 10px 16px 12px; grid-template-columns: 1fr; }
   .actionbar .ab-acts { justify-content: flex-start; }
 }
+
+/* モデルの一覧（v0.3.1） */
+.mtools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 4px 0; font-size: 13px; }
+.mtools label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+.mtools .ghost { margin-left: auto; }
+.mtag { display: inline-block; margin-left: 6px; padding: 0 5px; font-size: 10.5px; line-height: 16px; border: 1px solid var(--rule); color: var(--ink-2); vertical-align: 1px; }
+.mtag.free { border-color: var(--moss); color: var(--moss); }
+.mtag.new { border-color: var(--indigo); color: var(--indigo); }
+.mtag.exp { border-color: var(--shu); color: var(--shu); }
+.models { max-height: 340px; }

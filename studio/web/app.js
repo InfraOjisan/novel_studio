@@ -164,10 +164,52 @@ function updBusy() {  // 画面を描き直さずに、進み具合の文だけ�
   });
 }
 
+/* モデルの一覧（v0.3.1）：ふだんは「新しい・無料・既定・使ったことがある・選んだ」モデルだけ。検索はすべてから */
+const DAY = 86400;
+function recentDays() { return Number(S.settings.model_recent_days || 90); }
+function ageDays(m) { return m.created ? Math.floor((Date.now() / 1000 - m.created) / DAY) : null; }
+function keepIds() {
+  const st = S.settings, keep = new Set();
+  const add = (v) => { if (typeof v === "string" && v) keep.add(v); else if (v && v.model) keep.add(v.model); };
+  (st.propose_models || []).forEach(add);
+  ["skeleton_model", "brief_model", "draft_model", "deck_model"].forEach((k) => add(st[k]));
+  Object.values(st.roles || {}).forEach(add);
+  ((S.snap && S.snap.rounds) || []).forEach((r) => (r.models || []).forEach(add));
+  return keep;
+}
+function featured(m) { const a = ageDays(m); return m.free || (a != null && a <= recentDays()); }
+function shortlist(extra = [], filter = "") {
+  const all = S.models || [];
+  const f = filter.trim().toLowerCase();
+  const keep = keepIds(); extra.forEach((x) => keep.add(x));
+  const dated = all.some((m) => m.created);
+  let list = f ? all.filter((m) => m.id.toLowerCase().includes(f) || String(m.name || "").toLowerCase().includes(f))
+    : (S.allModels || !dated) ? all.slice() : all.filter((m) => keep.has(m.id) || featured(m));
+  const known = new Set(all.map((m) => m.id));
+  extra.filter((id) => id && !known.has(id) && (!f || id.toLowerCase().includes(f))).forEach((id) => list.push({ id }));  // 一覧にない（窓口を替えた・提供終了）モデルも、選んでいれば出す
+  const rank = (m) => (extra.includes(m.id) ? 0 : 1);
+  return list.sort((a, b) => rank(a) - rank(b) || (dated ? (b.created || 0) - (a.created || 0) : 0) || a.id.localeCompare(b.id));
+}
+function modelTags(m) {
+  const t = [], a = ageDays(m);
+  if (m.free) t.push(`<span class="mtag free">無料</span>`);
+  if (a != null && a <= recentDays()) t.push(`<span class="mtag new" title="${a}日前に公開">${a <= 14 ? "新" : a + "日"}</span>`);
+  if (m.expires) t.push(`<span class="mtag exp" title="提供の終わる日">${h(m.expires.slice(5).replace("-", "/"))}まで</span>`);
+  return t.join("");
+}
+function modelLabel(m) {
+  const a = ageDays(m);
+  return `${m.id}${m.in_per_m != null ? `　入${m.in_per_m}/出${m.out_per_m}` : ""}${m.free ? "　無料" : ""}${a != null && a <= recentDays() ? `　${a}日前` : ""}${m.expires ? `　${m.expires}まで` : ""}`;
+}
+async function refreshModels() {
+  const d = await api("GET", "/api/models?refresh=1");
+  S.models = d.models; S.settings = d.settings;
+  toast(`モデルの一覧を取り直しました（${d.models.length} 件）`);
+}
+
 function modelOptions(selected, filter) {
-  const list = S.models.length ? S.models : [{ id: selected }];
-  return list.filter((m) => !filter || m.id === selected || m.id.includes(filter))
-    .map((m) => `<option value="${h(m.id)}" ${m.id === selected ? "selected" : ""}>${h(m.id)}${m.in_per_m != null ? `　入${m.in_per_m}/出${m.out_per_m}` : ""}</option>`).join("");
+  const list = S.models.length ? shortlist([selected].filter(Boolean), filter || "") : [{ id: selected }];
+  return list.map((m) => `<option value="${h(m.id)}" ${m.id === selected ? "selected" : ""}>${h(modelLabel(m))}</option>`).join("");
 }
 
 function modelSelect(id, selected) {
@@ -410,9 +452,11 @@ function renderPropose() {
     ${fixed ? `<p class="notice">確定済みです。提案は読むだけです。</p>` : `
     <div class="cols">
       <div>
-        <label class="f">モデルを探す<input type="text" id="mFilter" placeholder="haiku, luna, deepseek…"></label>
+        <label class="f">モデルを探す（すべてのモデルから）<input type="text" id="mFilter" placeholder="haiku, luna, deepseek…" value="${h(S.mFilter || "")}"></label>
+        <div class="mtools"><label><input type="checkbox" id="mAll" ${S.allModels ? "checked" : ""}> すべて表示</label>
+          <span class="muted" id="mCount"></span><button class="ghost small" id="mRefresh" type="button" title="1日のキャッシュを使わずに取り直します">一覧を更新</button></div>
         <div class="models" id="mList"></div>
-        <p class="muted">単価は 100万トークンあたりのドル（入力／出力）。</p>
+        <p class="muted">ふだんは ${recentDays()}日以内に出たモデル・無料のモデル・既定と使ったことのあるモデル・選んだモデルだけを出します。単価は 100万トークンあたりのドル（入力／出力）。</p>
       </div>
       <div>
         <div class="form">
@@ -439,17 +483,24 @@ function renderPropose() {
   if ($("#toClassify")) $("#toClassify").onclick = () => { S.view = "classify"; render(); };
   if ($("#actionBar")) bindActionBar();
   if (fixed) return;
+  if (S.mPickSlug !== S.slug) { S.mPick = new Set(lastModels); S.mPickSlug = S.slug; S.mScroll = 0; }  // 選んだモデルは状態に持つ（描き直しで消えない・外したら戻らない）
   const drawModels = () => {
-    const f = $("#mFilter").value.trim();
-    const checked = new Set([...el.querySelectorAll("#mList input:checked")].map((x) => x.value));
-    const base = checked.size ? checked : new Set(lastModels);
-    const list = (S.models.length ? S.models : def.map((id) => ({ id }))).filter((m) => base.has(m.id) || !f || m.id.includes(f)).slice(0, 120);
-    $("#mList").innerHTML = list.map((m) => `<label><input type="checkbox" value="${h(m.id)}" ${base.has(m.id) ? "checked" : ""}><span>${h(m.id)}</span><span class="price">${m.in_per_m != null ? `${m.in_per_m}／${m.out_per_m}` : ""}</span></label>`).join("");
+    const box = $("#mList");
+    const list = S.models.length ? shortlist([...S.mPick], $("#mFilter").value) : [...S.mPick].map((id) => ({ id }));
+    box.innerHTML = list.map((m) => `<label><input type="checkbox" value="${h(m.id)}" ${S.mPick.has(m.id) ? "checked" : ""}><span>${h(m.id)}${modelTags(m)}</span><span class="price">${m.in_per_m != null ? `${m.in_per_m}／${m.out_per_m}` : ""}</span></label>`).join("")
+      || `<p class="muted" style="padding:6px 10px">見つかりません</p>`;
+    box.querySelectorAll("input").forEach((cb) => (cb.onchange = () => { if (cb.checked) S.mPick.add(cb.value); else S.mPick.delete(cb.value); count(); }));
+    box.scrollTop = S.mScroll || 0;
+    count();
   };
+  const count = () => ($("#mCount").textContent = `表示 ${$("#mList").querySelectorAll("input").length}／全 ${S.models.length}・選択 ${S.mPick.size}`);
   drawModels();
-  $("#mFilter").oninput = drawModels;
+  $("#mList").onscroll = () => (S.mScroll = $("#mList").scrollTop);
+  $("#mFilter").oninput = () => { S.mFilter = $("#mFilter").value; S.mScroll = 0; drawModels(); };
+  $("#mAll").onchange = () => { S.allModels = $("#mAll").checked; S.mScroll = 0; drawModels(); };
+  $("#mRefresh").onclick = () => guard(async () => { await refreshModels(); drawModels(); });
   const go = (mode) => guard(async () => {
-    const models = [...el.querySelectorAll("#mList input:checked")].map((x) => x.value);
+    const models = [...S.mPick];
     if (!models.length) throw new Error("モデルを一つ以上選んでください");
     const d = await api("POST", `/api/works/${S.slug}/propose`, { models, n: Number($("#pN").value), temperature: Number($("#pT").value), instruction: $("#pI").value, mode });
     const r = await waitJob(d.job, `提案（${models.length}モデル）`);
@@ -693,7 +744,7 @@ async function rescueDialog(a, extra) {
   const n = extra.n || e.current;
   const hist = isCh ? rescueHist(n) : (e.canon_rescues || []);
   const tried = new Set(hist.map((r) => r.model));
-  const list = S.models.length ? S.models.map((m) => m.id) : [premium];
+  const list = S.models.length ? shortlist([premium, ...tried].filter(Boolean)).map((m) => m.id) : [premium];
   const def = !tried.has(premium) ? premium : "";
   const f = await dialog(`<h2>${isCh ? "上位モデルで章を直す" : "上位モデルで CANON 全体を直す"}</h2>
     <p class="muted">選んだモデルを一回だけ呼びます（費用がかかります）。直したあと、審査役がもう一度だけ審査します。${isCh ? "直すのは指摘の箇所と前後の一、二文だけです。" : ""}</p>

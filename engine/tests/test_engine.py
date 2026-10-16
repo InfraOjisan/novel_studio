@@ -354,13 +354,13 @@ class ModelsCache(unittest.TestCase):
             os.environ.pop("NOVEL_LLM_BASE_URL", None)
         else:
             os.environ["NOVEL_LLM_BASE_URL"] = cls.saved
-        for f in cls.llm.CACHE.glob(f"*models_{cls.llm._base_tag()}*"):
+        for f in cls.llm.CACHE.glob(f"*models*{cls.llm._base_tag()}*"):
             f.unlink(missing_ok=True)
 
     def test_broken_cache_is_refetched(self):
         llm = self.llm
         llm.CACHE.mkdir(exist_ok=True)
-        f = llm.CACHE / f"models_{llm._base_tag()}.json"
+        f = llm.CACHE / f"models_v2_{llm._base_tag()}.json"
         f.write_text('[{"id": "anthropic/claude', encoding="utf-8")  # 書きかけのまま残ったキャッシュ
         self.assertIn("anthropic/claude-haiku-5.5", [m["id"] for m in llm.models()])
         self.assertTrue(json.loads(f.read_text(encoding="utf-8")))
@@ -460,6 +460,23 @@ class ChunkedClassify(unittest.TestCase):
         self.assertIn("| P01 |", md)
         self.assertIn("### あらすじ", md)
         self.assertEqual(len(json.loads(c.export_proposals("many", [], "json")[1])["proposals"]), 8)
+
+
+class ModelList(unittest.TestCase):
+    """モデルの一覧：使えないモデル（:batch・画像だけ・提供終了）を外し、絞り込みに使う情報を持たせる。"""
+
+    def test_model_entry(self):
+        import llm
+        e = llm._model_entry
+        base = {"architecture": {"output_modalities": ["text"]}, "pricing": {"prompt": "0.000001", "completion": "0.000002"}, "created": 1760000000}
+        self.assertIsNone(e({**base, "id": "a/b:batch"}))
+        self.assertIsNone(e({**base, "id": "a/img", "architecture": {"output_modalities": ["image"]}}))
+        self.assertIsNone(e({**base, "id": "a/old", "expiration_date": "2020-01-01"}))
+        r = e({**base, "id": "a/b", "expiration_date": "2099-12-31"})
+        self.assertEqual((r["in_per_m"], r["out_per_m"], r["free"], r["created"], r["expires"]), (1.0, 2.0, False, 1760000000, "2099-12-31"))
+        self.assertTrue(e({**base, "id": "a/c:free", "pricing": {"prompt": "0", "completion": "0"}})["free"])
+        self.assertEqual(e({**base, "id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}})["in_per_m"], None)
+        self.assertFalse(e({"id": "gpt-6-luna", "object": "model"})["free"])
 
 
 if __name__ == "__main__":
