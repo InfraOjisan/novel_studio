@@ -13,6 +13,8 @@
   MOCK_FAIL_FINAL=K          最終審査で第K章に重大な指摘を出し続ける（第K章を上位モデルで直すまで）
   MOCK_RESCUE_FAIL_MODEL=M   このモデル（カンマ区切り）で rescue した章は、審査に通らないままにする（別のモデルを選ぶ経路を通すため）
   MOCK_DELAY=秒              1回の応答を遅らせる（進み具合の表示を見るため）
+  MOCK_SKELETON_MAX=N        骨格の抜き出しで、1回に N 案より多く頼まれたら失敗する（上流が時間切れで諦めるのを真似る。小分けの経路を通すため）
+  MOCK_FAIL_SKELETON=P03,P05 この案を含む骨格の依頼は必ず失敗する（取れない案が残る経路を通すため）
 
 ハーネスの試験（harness/exams）でも、費用をかけずに進行役の振る舞いだけを見るのに使える。
 """
@@ -171,6 +173,9 @@ GENRES = {"SF": ["冷凍睡眠の船でAIが乗員を管理する", "氷の衛�
           "ミステリ": ["語り手が実は加害者だった", "社内報の暗号で横領を告発する", "密室の会議室で役員が倒れる"]}
 
 
+FAIL = "__MOCK_FAIL__"  # 上流のプロバイダが諦めた（504 の代わりに、再試行されない 400 で返す。テストを速くするため）
+
+
 def studio_answer(kind, text, model):
     seed = int(hashlib.md5((model + text[-200:]).encode()).hexdigest()[:8], 16)
     rnd = random.Random(seed)
@@ -199,6 +204,10 @@ def studio_answer(kind, text, model):
         return json.dumps({"proposal": p}, ensure_ascii=False)
     if kind == "skeleton":
         items = re.findall(r'^### (P\d+)\n(.*?)(?=^### P\d+|\Z)', section(text, "提案"), flags=re.S | re.M)
+        cap = int(os.environ.get("MOCK_SKELETON_MAX", "0") or 0)
+        bad = {x for x in os.environ.get("MOCK_FAIL_SKELETON", "").split(",") if x}
+        if (cap and len(items) > cap) or any(pid in bad for pid, _ in items):
+            return FAIL
         out = []
         for pid, body in items:
             if "冷凍睡眠" in body or "語り手が実は加害者" in body:
@@ -308,6 +317,8 @@ class H(BaseHTTPRequestHandler):
         else:
             out = "OK"
         time.sleep(float(os.environ.get("MOCK_DELAY", "0")))
+        if out == FAIL:
+            return self._json(400, {"error": {"message": "mock: upstream provider gave up (request too large)"}})
         pin, pout = PRICE.get(model, (1e-6, 2e-6))
         usage = {"prompt_tokens": len(text) // 2, "completion_tokens": len(out) // 2}
         usage["cost"] = round(usage["prompt_tokens"] * pin + usage["completion_tokens"] * pout, 8)

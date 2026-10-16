@@ -30,11 +30,14 @@ JOBS = {}
 JOBS_LOCK = threading.Lock()
 
 
-def run_job(slug, kind, fn, *a, **kw):
+def run_job(slug, kind, fn, *a, progress=False, **kw):
+    """fn を裏で走らせる。progress=True なら fn に progress(済んだ数, 全体, 何を) を渡し、画面に進み具合を出す。"""
     jid = uuid.uuid4().hex[:10]
-    job = {"id": jid, "slug": slug, "kind": kind, "state": "running", "started": time.time(), "result": None, "error": None}
+    job = {"id": jid, "slug": slug, "kind": kind, "state": "running", "started": time.time(), "result": None, "error": None, "progress": None}
     with JOBS_LOCK:
         JOBS[jid] = job
+    if progress:
+        kw["progress"] = lambda done, total, what="": job.update(progress={"done": done, "total": total, "what": what})
 
     def target():
         try:
@@ -51,7 +54,7 @@ def run_job(slug, kind, fn, *a, **kw):
 
 
 def running_jobs(slug):
-    return [{"id": j["id"], "kind": j["kind"], "since": round(time.time() - j["started"])} for j in JOBS.values()
+    return [{"id": j["id"], "kind": j["kind"], "since": round(time.time() - j["started"]), "progress": j.get("progress")} for j in JOBS.values()
             if j["slug"] == slug and j["state"] == "running"]
 
 
@@ -112,6 +115,11 @@ class H(BaseHTTPRequestHandler):
                         return self._send(200, raw=t.read_bytes(), ctype="application/epub+zip",
                                           headers={"Content-Disposition": f"attachment; filename*=UTF-8''{urllib.parse.quote(t.name)}"})
                     return self._send(200, {"path": q.get("path"), "text": t})
+                if parts[3] == "proposals_export":
+                    ids = [x for x in q.get("ids", "").split(",") if x]
+                    name, data, ctype = core.export_proposals(slug, ids, q.get("fmt", "md"))
+                    return self._send(200, raw=data, ctype=ctype,
+                                      headers={"Content-Disposition": f"attachment; filename*=UTF-8''{urllib.parse.quote(name)}"})
                 if parts[3] == "brief" and len(parts) == 5:
                     return self._send(200, core.render_brief(slug, parts[4]))
             return self._send(404, {"error": "not found"})
@@ -146,7 +154,8 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True})
             if act == "classify":
                 return self._send(200, {"job": run_job(slug, "classify", core.classify, slug, b.get("model"), b.get("method", "tool"),
-                                                       b.get("threshold"), float(b.get("w_text", 0.4)), bool(b.get("refresh")))})
+                                                       b.get("threshold"), float(b.get("w_text", 0.4)), bool(b.get("refresh")),
+                                                       ids=b.get("ids") or None, progress=True)})
             if act == "reclassify":
                 return self._send(200, core.reclassify(slug, b["threshold"], b.get("w_text", 0.4)))
             if act == "select":

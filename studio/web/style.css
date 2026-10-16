@@ -215,3 +215,22 @@ ol.hist li { margin: 2px 0; }
 .derive { border-top: 1px solid var(--rule); margin-top: 18px; padding-top: 6px; }
 details.retheme { margin-top: 18px; }
 details.retheme summary { cursor: pointer; color: var(--ink-2); }
+
+label.f.check > span:first-child { display: flex; gap: 8px; align-items: center; color: var(--ink); font-size: 14px; }
+
+/* 選んだ案：分析する・ファイル出力する（画面の最下部に固定） */
+.meta .pick { display: inline-flex; align-items: center; margin-right: -2px; cursor: pointer; }
+.meta .pick input { width: 16px; height: 16px; margin: 0; accent-color: var(--indigo); cursor: pointer; }
+.sheet.picked { box-shadow: inset 4px 0 0 var(--indigo); }
+.actionbar { position: sticky; bottom: 0; z-index: 4; margin: 28px -36px -80px; padding: 12px 36px 14px; background: var(--paper);
+  border-top: 2px solid var(--indigo); display: grid; grid-template-columns: 1fr auto; gap: 6px 18px; align-items: center; }
+.actionbar .ab-sel { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.actionbar .ab-sel > span { margin-right: 6px; }
+.actionbar .ab-sel b { font-size: 18px; color: var(--indigo); font-variant-numeric: tabular-nums; }
+.actionbar .ab-acts { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.actionbar .ab-out { display: inline-flex; gap: 6px; align-items: center; }
+.actionbar #abHint, .actionbar .busy { grid-column: 1 / -1; margin: 0; }
+@media (max-width: 760px) {
+  .actionbar { margin: 20px -16px -60px; padding: 10px 16px 12px; grid-template-columns: 1fr; }
+  .actionbar .ab-acts { justify-content: flex-start; }
+}

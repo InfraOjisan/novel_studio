@@ -5,7 +5,7 @@ const STAGE_JA = { theme: "テーマ", propose: "提案", classify: "分類", br
 const FIELDS_JA = { kind: "種類", genre: "ジャンル", title: "仮タイトル", setting: "舞台設定", synopsis: "あらすじ", highlight: "見せ場",
   appeal: "何が面白いか", must_keep: "譲れないポイント", genre_reason: "このジャンルである必然" };
 const ROLE_JA = { writer: "書き手（設計・本文）", reviewer: "審査役（審査・記録）", polisher: "磨き（任意）", premium: "上位モデル（例外処理・校正だけ）" };
-const S = { slug: "", snap: null, models: [], settings: {}, view: null, briefV: null, briefTab: "read", jobs: {}, chapterView: null };
+const S = { slug: "", snap: null, models: [], settings: {}, view: null, briefV: null, briefTab: "read", jobs: {}, chapterView: null, pick: new Set() };
 
 const $ = (q, el = document) => el.querySelector(q);
 const h = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -39,6 +39,7 @@ async function waitJob(jid, label) {
     for (;;) {
       await new Promise((r) => setTimeout(r, 1500));
       const j = await api("GET", `/api/jobs/${jid}`);
+      if (j.progress) { S.jobs[jid] = `${label}（${j.progress.what} ${j.progress.done}/${j.progress.total}）`; updBusy(); }
       if (j.state === "done") return j.result;
       if (j.state === "error") throw new Error(j.error);
     }
@@ -143,12 +144,24 @@ function renderMeter() {
   $("#meterTip").textContent = lines.join("\n");
 }
 
-function busyLine(kinds) {
+function busyText(kinds) {
   const mine = Object.values(S.jobs).filter((l) => !kinds || kinds.some((k) => l.startsWith(k)));
   const srv = (S.snap && S.snap.jobs || []).filter((j) => !kinds || kinds.includes(j.kind));
   if (!mine.length && !srv.length) return "";
-  const txt = mine.length ? mine.join("、") : srv.map((j) => `${j.kind}（${j.since}秒）`).join("、");
-  return `<p class="busy">${h(txt)}を実行中です。このページを離れても止まりません。</p>`;
+  const txt = mine.length ? mine.join("、") : srv.map((j) => `${j.kind}（${j.since}秒${j.progress ? `・${j.progress.what} ${j.progress.done}/${j.progress.total}` : ""}）`).join("、");
+  return `${txt}を実行中です。このページを離れても止まりません。`;
+}
+
+function busyLine(kinds) {
+  const t = busyText(kinds);
+  return t ? `<p class="busy" data-kinds="${h((kinds || []).join(","))}">${h(t)}</p>` : "";
+}
+
+function updBusy() {  // 画面を描き直さずに、進み具合の文だけを書き換える（入力中の欄を消さないため）
+  document.querySelectorAll(".busy[data-kinds]").forEach((el) => {
+    const t = busyText(el.dataset.kinds ? el.dataset.kinds.split(",") : null);
+    if (t) el.textContent = t;
+  });
 }
 
 function modelOptions(selected, filter) {
@@ -196,7 +209,7 @@ function renderTheme() {
     $("#createBtn").onclick = () => guard(async () => {
       const slug = $("#slugIn").value.trim();
       const d = await api("POST", "/api/works", { slug, theme: readThemeForm(el) });
-      S.slug = d.slug; S.view = "propose";
+      S.slug = d.slug; S.view = "propose"; S.pick = new Set();
       await loadWorks(S.slug); await refresh();
     });
     return;
@@ -224,7 +237,7 @@ function renderTheme() {
     if (!ns) { toast("新しい作品フォルダの名前を入れてください"); $("#newSlug").focus(); return; }
     if (ns === S.slug) { toast("いまの作品とは別の名前にしてください"); $("#newSlug").focus(); return; }
     const d = await api("POST", `/api/works/${S.slug}/derive`, { new_slug: ns, theme: readThemeForm(el.querySelector(".form")) });
-    S.slug = d.slug; S.view = "propose"; S.briefV = null; S.chapterView = null; localStore("slug", S.slug);
+    S.slug = d.slug; S.view = "propose"; S.briefV = null; S.chapterView = null; S.pick = new Set(); localStore("slug", S.slug);
     await loadWorks(S.slug); await refresh(); toast(`新しい作品 ${d.slug} を作りました。提案を頼んでください。`);
   });
   $("#retheme").onclick = () => guard(async () => {
@@ -235,7 +248,7 @@ function renderTheme() {
 }
 
 async function gotoWork(slug) {
-  S.slug = slug; S.view = null; S.briefV = null; S.chapterView = null; localStore("slug", slug);
+  S.slug = slug; loadPick(); S.view = null; S.briefV = null; S.chapterView = null; localStore("slug", slug);
   $("#workSel").value = slug; await refresh();
 }
 
@@ -250,7 +263,7 @@ function sheet(p, opts = {}) {
   const fixed = !!S.snap.fixed;
   return `<article class="sheet${sel ? " selected" : ""}${p.hidden ? " hidden-p" : ""}" id="sheet-${p.id}" data-pid="${p.id}">
     ${c ? `<div class="stamp k-${h(c.label)}" title="${c.nearest ? `いちばん近い案 ${h(c.nearest)}（${c.sim}）` : ""}">${h(c.label).replace("バリエーション", "バリエー<br>ション")}</div>` : ""}
-    <div class="meta"><b>${p.id}</b><span>${h(short(p.model))}</span><span>${usd(p.usd)}</span><span>${h(p.kind)}</span><span>${h(p.genre)}</span>${origin}${sel ? "<b>選択中</b>" : ""}</div>
+    <div class="meta">${opts.noActs ? "" : `<label class="pick" title="分析・ファイル出力の対象にする"><input type="checkbox" data-pick="${p.id}" ${S.pick.has(p.id) ? "checked" : ""}></label>`}<b>${p.id}</b><span>${h(short(p.model))}</span><span>${usd(p.usd)}</span><span>${h(p.kind)}</span><span>${h(p.genre)}</span>${origin}${sel ? "<b>選択中</b>" : ""}</div>
     <h3>${h(p.title)}</h3>
     <p class="syn">${h(p.synopsis)}</p>
     <dl>${dl}</dl>
@@ -269,6 +282,83 @@ function bindSheets(root) {
     const pid = b.closest(".sheet").dataset.pid;
     b.onclick = () => guard(() => sheetAction(b.dataset.a, pid, b));
   });
+  root.querySelectorAll("input[data-pick]").forEach((cb) => (cb.onchange = () => {
+    if (cb.checked) S.pick.add(cb.dataset.pick); else S.pick.delete(cb.dataset.pick);
+    syncPick();
+  }));
+}
+
+/* ---------------------------------------------------------------- 選んだ案：分析する・ファイル出力する（画面の最下部） */
+function savePick() { localStore("pick." + S.slug, JSON.stringify([...S.pick])); }
+
+function loadPick() {
+  let ids = [];
+  try { ids = JSON.parse(localStore("pick." + S.slug) || "[]"); } catch (e) { ids = []; }
+  S.pick = new Set(ids);
+}
+
+function syncPick() {  // 同じ案が二か所に描かれていても、印とバーの数をそろえる
+  for (const id of [...S.pick]) if (!S.snap || !S.snap.proposals[id]) S.pick.delete(id);
+  document.querySelectorAll("input[data-pick]").forEach((cb) => (cb.checked = S.pick.has(cb.dataset.pick)));
+  document.querySelectorAll(".sheet").forEach((el) => el.classList.toggle("picked", S.pick.has(el.dataset.pid)));
+  savePick();
+  const n = S.pick.size, bar = $("#actionBar");
+  if (!bar) return;
+  $("#abN").textContent = n;
+  const batch = (S.settings.skeleton_batch || 3);
+  const c = S.snap.classify, sk = Object.assign({}, S.snap.skeletons || {}, (c && c.skeletons) || {});
+  const need = [...S.pick].filter((id) => !sk[id]).length;
+  const fixed = !!(S.snap && S.snap.fixed);
+  $("#abAnalyze").disabled = n < 2 || fixed;
+  $("#abExport").disabled = n < 1;
+  $("#abHint").textContent = fixed ? "確定済みの作品は分析できません（ファイル出力はできます）。" : n < 2 ? "分析は2案から、ファイル出力は1案から選べます。" :
+    need ? `骨格の抜き出し：${need}案を ${batch}案ずつ ${Math.ceil(need / batch)} 回に分けて頼みます（取れた分から保存）。` : "骨格はすべて抜き出し済みです（モデルを呼ばずに分類します）。";
+}
+
+function actionBar() {
+  const c = S.snap.classify;
+  return `<div class="actionbar" id="actionBar">
+    <div class="ab-sel"><span><b id="abN">0</b> 案を選択中</span>
+      <button class="ghost small" data-sel="all" type="button">全部</button>
+      <button class="ghost small" data-sel="last" type="button">最新ラウンド</button>
+      ${c ? `<button class="ghost small" data-sel="外れ値" type="button">外れ値</button><button class="ghost small" data-sel="バリエーション" type="button">バリエーション</button>` : ""}
+      <button class="ghost small" data-sel="none" type="button">外す</button></div>
+    <div class="ab-acts">
+      <button class="act" id="abAnalyze" type="button">分析する</button>
+      <span class="ab-out"><select id="abFmt" aria-label="ファイルの形式"><option value="md">Markdown（読む）</option><option value="csv">CSV（Excel で並べる）</option><option value="json">JSON</option></select>
+      <button class="act" id="abExport" type="button">ファイル出力する</button></span>
+    </div>
+    <p class="muted" id="abHint"></p>
+    ${busyLine(["分析", "classify"])}
+  </div>`;
+}
+
+function bindActionBar() {
+  const snap = S.snap;
+  document.querySelectorAll("#actionBar [data-sel]").forEach((b) => (b.onclick = () => {
+    const k = b.dataset.sel, labels = (snap.classify && snap.classify.labels) || {};
+    const visible = Object.values(snap.proposals).filter((p) => !p.hidden).map((p) => p.id);
+    if (k === "none") S.pick.clear();
+    else if (k === "all") visible.forEach((id) => S.pick.add(id));
+    else if (k === "last") { S.pick.clear(); const r = snap.rounds[snap.rounds.length - 1]; (r ? r.proposals : []).forEach((id) => S.pick.add(id)); }
+    else { S.pick.clear(); visible.filter((id) => labels[id] && labels[id].label === k).forEach((id) => S.pick.add(id)); }
+    syncPick();
+  }));
+  $("#abExport").onclick = () => {
+    const a = document.createElement("a");
+    a.href = `/api/works/${S.slug}/proposals_export?fmt=${$("#abFmt").value}&ids=${encodeURIComponent([...S.pick].join(","))}`;
+    a.download = ""; document.body.appendChild(a); a.click(); a.remove();
+  };
+  $("#abAnalyze").onclick = () => guard(async () => {
+    const ids = [...S.pick];
+    const body = { ids, method: $("#cM") ? $("#cM").value : "tool", model: $("#cModel") ? $("#cModel").value : undefined,
+      refresh: $("#cRefresh") ? $("#cRefresh").checked : false };
+    const d = await api("POST", `/api/works/${S.slug}/classify`, body);
+    S.view = "classify";
+    const r = await waitJob(d.job, `分析（${ids.length}案）`);
+    toast(`分析しました（${r.ids.length}案）` + (r.missing && r.missing.length ? `。骨格が取れなかった案：${r.missing.join("・")}` : ""), !!(r.missing && r.missing.length));
+  });
+  syncPick();
 }
 
 async function sheetAction(a, pid, btn) {
@@ -343,9 +433,11 @@ function renderPropose() {
       ${Object.keys(r.errors || {}).length ? `<p class="notice">返ってこなかったモデル：${Object.entries(r.errors).map(([m, e]) => `${h(short(m))}（${h(e).slice(0, 160)}）`).join("、")}</p>` : ""}
       <div class="sheets">${r.proposals.map((pid) => snap.proposals[pid]).filter(Boolean).map((p) => sheet(p)).join("")}</div>`).join("")}
     ${extra.length ? `<h2>直した案・改稿した案</h2><div class="sheets">${extra.map((p) => sheet(p)).join("")}</div>` : ""}
-    ${snap.rounds.length ? `<div class="row"><button class="act" id="toClassify" type="button">分類へ進む</button></div>` : ""}`;
+    ${snap.rounds.length ? `<div class="row"><button class="act" id="toClassify" type="button">分類の画面へ</button></div>` : ""}
+    ${Object.keys(snap.proposals).length ? actionBar() : ""}`;
   bindSheets(el);
   if ($("#toClassify")) $("#toClassify").onclick = () => { S.view = "classify"; render(); };
+  if ($("#actionBar")) bindActionBar();
   if (fixed) return;
   const drawModels = () => {
     const f = $("#mFilter").value.trim();
@@ -377,12 +469,15 @@ function renderClassify() {
   el.innerHTML = `<header><h1>分類</h1><span class="muted">収束・バリエーション・外れ値</span></header>
     <p>モデルに各案の骨格（誰が欺く・何を隠す・どの層で驚かせる・何がひっくり返る・舞台・結末）だけを抜き出させ、似ているかどうかは道具が数えます。AI の審判は重複の判定がぶれるため、判定はルールで行います。AI に読ませた分類も並べて見られます。</p>
     <div class="form">
-      <label class="f">やり方<select id="cM"><option value="tool">骨格を数える（既定）</option><option value="both">骨格を数える＋AIにも読ませる</option><option value="ai">AIに読ませるだけ</option></select></label>
-      <label class="f">骨格を抜き出すモデル${modelSelect("cModel", (c && c.model) || S.settings.skeleton_model)}</label>
+      <label class="f">やり方<select id="cM">${[["tool", "骨格を数える（既定）"], ["both", "骨格を数える＋AIにも骨格を読ませる"], ["ai", "AIに骨格を読ませるだけ"]].map(([k, v]) => `<option value="${k}" ${k === (S.cMethod || "tool") ? "selected" : ""}>${v}</option>`).join("")}</select></label>
+      <label class="f">骨格を抜き出すモデル${modelSelect("cModel", S.cModel || (c && c.model) || S.settings.skeleton_model)}</label>
+      <label class="f check"><span><input type="checkbox" id="cRefresh"> 選んだ案の骨格を抜き出し直す</span></label>
     </div>
-    <div class="row"><button class="act" id="cGo" type="button" ${fixed ? "disabled" : ""}>${c ? "新しい案を足して分類し直す" : "分類する"}</button>
-      ${c ? `<label class="muted"><input type="checkbox" id="cRefresh"> 骨格を抜き出し直す</label>` : ""}</div>
-    ${busyLine(["分類", "classify"])}
+    <p class="muted">案を選んで、画面のいちばん下の「分析する」を押してください。骨格は ${S.settings.skeleton_batch || 3} 案ずつに分けて頼み、取れた分から保存します（途中で落ちても、もう一度押せば残りだけを頼みます）。AI に読ませるときも、本文ではなく骨格の一覧だけを渡します。</p>
+    ${c ? `<p class="muted">いまの分類：${(c.ids || []).length}案（${h((c.ids || []).join("・"))}）　${h(c.ts || "")}</p>` : ""}
+    ${c && c.missing && c.missing.length ? `<div class="notice">骨格を抜き出せなかった案：${h(c.missing.join("・"))}（分類から外しました）。もう一度「分析する」を押すと、その案だけを頼み直します。
+      ${Object.entries(c.errors || {}).map(([k, v]) => `<br><span class="muted">${h(k)}：${h(v).slice(0, 200)}</span>`).join("")}</div>` : ""}
+    ${c && c.ai_error ? `<div class="notice">AI の読みは返ってきませんでした（骨格による分類は済んでいます）：${h(c.ai_error).slice(0, 240)}</div>` : ""}
     ${c && c.clusters && c.clusters.length ? `
       <div class="slider"><span class="muted">似ているとみなす境目</span><input type="range" id="cTh" min="0.2" max="0.9" step="0.05" value="${c.threshold}"><b id="cThV">${c.threshold}</b>
       <span class="muted">案どうしの近さの平均 ${c.mean_similarity ?? "—"}</span></div>
@@ -400,14 +495,15 @@ function renderClassify() {
     ${c && c.skeletons && Object.keys(c.skeletons).length ? `<details><summary><h2 style="display:inline">骨格の一覧</h2></summary>
       <table><tr><th>案</th><th>誰が欺く</th><th>何を隠す</th><th>層</th><th>何が反転</th><th>舞台</th><th>結末</th><th>一行</th></tr>
       ${Object.entries(c.skeletons).map(([pid, s]) => `<tr><td>${pid}</td><td>${h(s.deceiver)}</td><td>${h(s.hidden)}</td><td>${h(s.layer)}</td><td>${h(s.flip)}</td><td>${h(s.stage)}</td><td>${h(s.ending)}</td><td>${h(s.one_line)}</td></tr>`).join("")}</table></details>` : ""}
-    ${c ? `<h2>分類つきの案</h2><div class="sheets">${Object.values(props).filter((p) => !p.hidden).map((p) => sheet(p)).join("")}</div>` : ""}
-    ${c ? `<div class="row"><button class="ghost" id="cRoll" type="button" ${snap.avoid.length && !fixed ? "" : "disabled"}>収束した骨格を避けて、もう一度出してもらう</button></div>` : ""}`;
+    <h2>${c ? "分類つきの案" : "案"}</h2><p class="muted">左上の印は、分析・ファイル出力の対象です。</p>
+      <div class="sheets">${Object.values(props).filter((p) => !p.hidden).map((p) => sheet(p)).join("")}</div>
+    ${c ? `<div class="row"><button class="ghost" id="cRoll" type="button" ${snap.avoid.length && !fixed ? "" : "disabled"}>収束した骨格を避けて、もう一度出してもらう</button></div>` : ""}
+    ${Object.keys(props).length ? actionBar() : ""}`;
   bindSheets(el);
   el.querySelectorAll(".chip").forEach((ch) => (ch.onclick = () => { const s = $(`#sheet-${ch.dataset.pid}`, el); if (s) { s.classList.add("open"); s.scrollIntoView({ behavior: "smooth", block: "center" }); } }));
-  $("#cGo").onclick = () => guard(async () => {
-    const d = await api("POST", `/api/works/${S.slug}/classify`, { method: $("#cM").value, model: $("#cModel").value, refresh: $("#cRefresh") ? $("#cRefresh").checked : false });
-    await waitJob(d.job, "分類"); toast("分類しました");
-  });
+  $("#cM").onchange = () => (S.cMethod = $("#cM").value);
+  $("#cModel").onchange = () => (S.cModel = $("#cModel").value);
+  if ($("#actionBar")) bindActionBar();
   if ($("#cTh")) {
     $("#cTh").oninput = () => ($("#cThV").textContent = $("#cTh").value);
     $("#cTh").onchange = () => guard(async () => { await api("POST", `/api/works/${S.slug}/reclassify`, { threshold: Number($("#cTh").value) }); await refresh(); });
@@ -845,7 +941,7 @@ document.querySelectorAll("#rail button").forEach((b) => (b.onclick = () => {
   if (li.classList.contains("locked")) return;
   S.view = li.dataset.stage; render();
 }));
-$("#workSel").onchange = async () => { S.slug = $("#workSel").value; S.view = null; S.briefV = null; S.chapterView = null; localStore("slug", S.slug); await refresh(); };
+$("#workSel").onchange = async () => { S.slug = $("#workSel").value; loadPick(); S.view = null; S.briefV = null; S.chapterView = null; localStore("slug", S.slug); await refresh(); };
 $("#newWorkBtn").onclick = () => { S.slug = ""; S.snap = null; S.view = "theme"; $("#workSel").value = ""; render(); };
 
 function localStore(k, v) {
@@ -856,6 +952,6 @@ function localStore(k, v) {
   await guard(loadModels);
   await guard(() => loadWorks());
   const last = localStore("slug");
-  if (last && [...$("#workSel").options].some((o) => o.value === last)) { S.slug = last; $("#workSel").value = last; }
+  if (last && [...$("#workSel").options].some((o) => o.value === last)) { S.slug = last; $("#workSel").value = last; loadPick(); }
   await refresh();
 })();

@@ -37,6 +37,8 @@ DEFAULT_SETTINGS = {
     "roles": {"writer": "anthropic/claude-haiku-5.5", "reviewer": "openai/gpt-6-luna-pro",
               "polisher": "anthropic/claude-haiku-5.5", "premium": "anthropic/claude-opus-5.5"},
     "threshold": 0.5,
+    "skeleton_batch": 3,      # 骨格の抜き出しで、1回に頼む案の数（多いと上流のプロバイダが時間切れで諦める）
+    "skeleton_parallel": 2,   # 骨格の抜き出しを同時に何本まで走らせるか
     # 表紙の画像生成モデル。一覧（/images/models）にあるものから、この順で既定を選ぶ
     "cover_models": ["google/gemini-2.5-flash-image", "openai/gpt-image-2", "bytedance-seed/seedream-4.5", "black-forest-labs/flux.2-pro"],
 }
@@ -390,61 +392,216 @@ def _props_block(props):
     return "\n\n".join(f"### {p['id']}\n" + "\n".join(f"{f}: {p.get(f, '')}" for f in PROPOSAL_FIELDS if p.get(f)) for p in props)
 
 
-def classify(slug, model=None, method="tool", threshold=None, w_text=0.4, refresh_skeletons=False):
-    """method = tool（骨格を抜き出してルールで分類。既定）| ai（モデルに読ませて分類）| both。"""
-    st = load(slug)
-    props = active_proposals(st)
-    if len(props) < 2:
-        raise StudioError("分類するには案が2つ以上必要です")
-    model = model or settings()["skeleton_model"]
-    threshold = float(threshold if threshold is not None else settings()["threshold"])
-    prev = st.get("classify") or {}
-    sk = {} if refresh_skeletons else dict(prev.get("skeletons", {}))
-    result = {"ts": now(), "method": method, "model": model, "skeletons": sk}
-    need = [p for p in props if p["id"] not in sk]
-    if method in ("tool", "both") and need:
-        ids = [p["id"] for p in need]
+def skeleton_store(st):
+    """抜き出し済みの骨格 {pid: {...}}。分類の結果とは別に持ち、バッチごとに書き足す（途中で落ちても、取れた分は残る）。"""
+    sk = dict((st.get("classify") or {}).get("skeletons") or {})  # 古い版は分類の結果の中に持っていた
+    sk.update(st.get("skeletons") or {})
+    return sk
+
+
+def _pick(st, ids):
+    """分析する案。ids があればその案（外した案も、選ばれていれば含める）、なければ外していない案すべて。"""
+    if ids:
+        missing = [i for i in ids if i not in st["proposals"]]
+        if missing:
+            raise StudioError(f"{', '.join(missing)} がありません")
+        return [st["proposals"][i] for i in dict.fromkeys(ids)]
+    return active_proposals(st)
+
+
+def _batches(items, size):
+    size = max(1, int(size))
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def extract_skeletons(slug, props, model, refresh=False, progress=None):
+    """骨格を小分けに抜き出す。1回の依頼は batch 案まで（既定 3）、同時に parallel 本まで（既定 2）。
+    バッチが失敗したら、その案を1案ずつに分けてもう一度だけ頼む。取れた骨格はその都度 studio.json に書く。
+    返り値：(骨格 {pid: ...}, 取れなかった案 [pid], エラー {pid: 理由})。"""
+    cfg = settings()
+    store = skeleton_store(load(slug))
+    if refresh:  # 選んだ案の骨格だけを抜き出し直す（ほかの案の骨格はそのまま。新しい骨格で上書きされる）
+        for p in props:
+            store.pop(p["id"], None)
+    need = [p for p in props if p["id"] not in store]
+    total, done = len(props), len(props) - len(need)
+    errors = {}
+    if progress:
+        progress(done, total, "骨格")
+
+    def one(batch):
+        ids = [p["id"] for p in batch]
 
         def chk(o):
             got = {s.get("id") for s in (o or {}).get("skeletons", []) if isinstance(s, dict)}
             miss = [i for i in ids if i not in got]
             return f"{', '.join(miss)} の骨格がない" if miss else None
-        obj, rec = _call_json(slug, "skeleton", model, prompt("skeleton", PROPOSALS=_props_block(need)), chk, temperature=0.1)
-        for s in obj["skeletons"]:
-            if s.get("id") in ids:
-                sk[s["id"]] = {k: s.get(k, "") for k in similarity.SK_FIELDS + ["one_line"]}
-    if method in ("tool", "both"):
-        result.update(similarity.classify(props, sk, threshold, w_text))
+        obj, rec = _call_json(slug, "skeleton", model, prompt("skeleton", PROPOSALS=_props_block(batch)), chk, temperature=0.1,
+                              note=",".join(ids))
+        return {s["id"]: {k: s.get(k, "") for k in similarity.SK_FIELDS + ["one_line"]} for s in obj["skeletons"] if s.get("id") in ids}
+
+    def keep(got):
+        nonlocal done
+        with lock(slug):
+            st = load(slug)
+            st.setdefault("skeletons", {}).update(got)
+            save(slug, st)
+        store.update(got)
+        done += len(got)
+        if progress:
+            progress(done, total, "骨格")
+
+    retry = []
+    batches = _batches(need, cfg.get("skeleton_batch", 3))
+    with cf.ThreadPoolExecutor(max_workers=max(1, int(cfg.get("skeleton_parallel", 2)))) as ex:
+        futs = {ex.submit(one, b): b for b in batches}
+        for f in cf.as_completed(futs):
+            b = futs[f]
+            try:
+                keep(f.result())
+            except StudioError as e:
+                if len(b) > 1:
+                    retry += b  # まとめて頼んで落ちた：1案ずつに分けてもう一度
+                else:
+                    errors[b[0]["id"]] = str(e)
+    if retry:
+        with cf.ThreadPoolExecutor(max_workers=max(1, int(cfg.get("skeleton_parallel", 2)))) as ex:
+            futs = {ex.submit(one, [p]): p for p in retry}
+            for f in cf.as_completed(futs):
+                try:
+                    keep(f.result())
+                except StudioError as e:
+                    errors[futs[f]["id"]] = str(e)
+    missing = [p["id"] for p in props if p["id"] not in store]
+    return {p["id"]: store[p["id"]] for p in props if p["id"] in store}, missing, errors
+
+
+def _skeleton_block(props, sk):
+    """AI に読ませる要約：題・ジャンル・骨格だけ（本文は送らない＝案が多くても依頼が重くならない）。"""
+    out = []
+    for p in props:
+        s = sk.get(p["id"]) or {}
+        out.append(f"### {p['id']}\n" + "\n".join(f"{k}: {v}" for k, v in
+                   [("title", p.get("title")), ("genre", p.get("genre")), ("kind", p.get("kind"))] +
+                   [(k, s.get(k)) for k in similarity.SK_FIELDS + ["one_line"]] if v))
+    return "\n\n".join(out)
+
+
+def classify(slug, model=None, method="tool", threshold=None, w_text=0.4, refresh_skeletons=False, ids=None, progress=None):
+    """選んだ案（ids。なければ外していない案すべて）を分類する。
+    method = tool（骨格を抜き出してルールで分類。既定）| ai（骨格をモデルに読ませて分類）| both。
+    骨格は小分けに抜き出して途中保存する。AI の分類は、本文ではなく骨格の一覧だけを渡す（小分けの結果で投げる）。"""
+    st = load(slug)
+    props = _pick(st, ids)
+    if len(props) < 2:
+        raise StudioError("分類するには案を2つ以上選んでください")
+    model = model or settings()["skeleton_model"]
+    threshold = float(threshold if threshold is not None else settings()["threshold"])
+    sk, missing, errors = extract_skeletons(slug, props, model, refresh_skeletons, progress)
+    ok = [p for p in props if p["id"] in sk]
+    if len(ok) < 2:
+        raise StudioError("骨格を抜き出せた案が2つ未満です（" + "；".join(f"{k}：{v[:160]}" for k, v in errors.items()) + "）。もう一度押すと、取れなかった案だけを頼み直します")
+    result = {"ts": now(), "method": method, "model": model, "skeletons": sk, "ids": [p["id"] for p in ok],
+              "missing": missing, "errors": errors}
+    if method in ("tool", "both", "ai"):
+        result.update(similarity.classify(ok, sk, threshold, w_text))
     if method in ("ai", "both"):
+        if progress:
+            progress(len(ok), len(props), "AI の読み")
+
         def chk2(o):
             return None if isinstance(o, dict) and isinstance(o.get("labels"), list) else "labels がない"
-        obj, rec = _call_json(slug, "classify", model, prompt("classify", PROPOSALS=_props_block(props)), chk2, temperature=0.1)
-        result["ai"] = {"labels": {x["id"]: {"label": x.get("label"), "reason": x.get("reason", "")} for x in obj["labels"] if x.get("id")},
-                        "types": obj.get("types", [])}
-        if method == "ai":
+        try:
+            obj, rec = _call_json(slug, "classify", model, prompt("classify", PROPOSALS=_skeleton_block(ok, sk)), chk2, temperature=0.1)
+            result["ai"] = {"labels": {x["id"]: {"label": x.get("label"), "reason": x.get("reason", "")} for x in obj["labels"] if x.get("id")},
+                            "types": obj.get("types", [])}
+        except StudioError as e:  # 骨格の分類は済んでいるので、AI の読みが落ちても結果は残す
+            result["ai_error"] = str(e)
+        if method == "ai" and result.get("ai"):
             result["labels"] = {k: {"label": v["label"], "cluster": None, "nearest": None, "sim": None} for k, v in result["ai"]["labels"].items()}
             result["clusters"] = []
     with lock(slug):
         st = load(slug)
         st["classify"] = result
-        st["log"].append(f"{now()} 分類（{method}、しきい値 {threshold}）")
+        st["log"].append(f"{now()} 分類（{method}、{len(ok)}案、しきい値 {threshold}{'、骨格の取れない案 ' + ','.join(missing) if missing else ''}）")
         save(slug, st)
     return result
 
 
 def reclassify(slug, threshold, w_text=0.4):
-    """骨格は抜き出し済みのものを使い、しきい値だけ変えて分類し直す（モデルを呼ばない）。"""
+    """骨格は抜き出し済みのものを使い、しきい値だけ変えて分類し直す（モデルを呼ばない）。分類した案の組はそのまま。"""
     st = load(slug)
     c = st.get("classify")
-    if not c or not c.get("skeletons"):
-        raise StudioError("先に分類（tool）を実行してください")
-    props = [p for p in active_proposals(st) if p["id"] in c["skeletons"]]
-    c.update(similarity.classify(props, c["skeletons"], float(threshold), float(w_text)))
+    sk = skeleton_store(st)
+    if not c or not sk:
+        raise StudioError("先に分類してください")
+    ids = [i for i in (c.get("ids") or [p["id"] for p in active_proposals(st)]) if i in sk and i in st["proposals"]]
+    c.update(similarity.classify([st["proposals"][i] for i in ids], sk, float(threshold), float(w_text)))
     with lock(slug):
         st = load(slug)
         st["classify"] = c
         save(slug, st)
     return c
+
+
+PROPOSAL_EXPORTS = {"md": ("md", "text/markdown; charset=utf-8"), "csv": ("csv", "text/csv; charset=utf-8"),
+                    "json": ("json", "application/json; charset=utf-8")}
+PROPOSAL_JA = {"kind": "種類", "genre": "ジャンル", "title": "仮タイトル", "setting": "舞台設定", "synopsis": "あらすじ", "highlight": "見せ場",
+               "appeal": "何が面白いか", "must_keep": "譲れないポイント", "genre_reason": "このジャンルである必然"}
+SK_JA = {"deceiver": "誰が欺く", "hidden": "何を隠す", "layer": "どの層で驚かせる", "flip": "何が反転", "stage": "舞台", "ending": "結末",
+         "one_line": "一行"}
+
+
+def export_proposals(slug, ids, fmt="md"):
+    """選んだ案を一つのファイルに書き出す（見比べるため）。分類のラベルと骨格があれば一緒に入れる。
+    md＝読む用（一覧表＋全文）、csv＝Excel で並べる用（BOM つき UTF-8）、json＝ほかの道具に渡す用。"""
+    if fmt not in PROPOSAL_EXPORTS:
+        raise StudioError(f"不明な形式 {fmt}")
+    st = load(slug)
+    props = _pick(st, ids)
+    if not props:
+        raise StudioError("書き出す案を選んでください")
+    c = st.get("classify") or {}
+    labels, sk = c.get("labels") or {}, skeleton_store(st)
+    ai = (c.get("ai") or {}).get("labels") or {}
+    rows = []
+    for p in props:
+        lab, s = labels.get(p["id"]) or {}, sk.get(p["id"]) or {}
+        rows.append({"id": p["id"], "round": p.get("round", ""), "model": p.get("model", ""), "origin": p.get("origin", ""),
+                     "parent": p.get("parent", ""), **{f: p.get(f, "") for f in PROPOSAL_FIELDS},
+                     "label": lab.get("label", ""), "nearest": lab.get("nearest", "") or "", "sim": lab.get("sim", "") if lab.get("sim") is not None else "",
+                     "ai_label": (ai.get(p["id"]) or {}).get("label", ""), "ai_reason": (ai.get(p["id"]) or {}).get("reason", ""),
+                     **{f"sk_{k}": s.get(k, "") for k in similarity.SK_FIELDS + ["one_line"]}, "usd": p.get("usd", 0)})
+    ext, ctype = PROPOSAL_EXPORTS[fmt]
+    name = f"{slug}_企画案_{len(rows)}案.{ext}"
+    if fmt == "json":
+        return name, json.dumps({"slug": slug, "theme": st["theme"], "exported": now(), "proposals": rows}, ensure_ascii=False, indent=1).encode("utf-8"), ctype
+    if fmt == "csv":
+        import csv
+        import io
+        heads = {"id": "案", "round": "ラウンド", "model": "モデル", "origin": "出どころ", "parent": "元の案", **PROPOSAL_JA,
+                 "label": "分類", "nearest": "いちばん近い案", "sim": "近さ", "ai_label": "AIの分類", "ai_reason": "AIの理由",
+                 **{f"sk_{k}": f"骨格：{v}" for k, v in SK_JA.items()}, "usd": "費用（ドル）"}
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=list(heads), extrasaction="ignore", lineterminator="\r\n")
+        buf.write(",".join(heads.values()) + "\r\n")
+        w.writerows(rows)
+        return name, ("\ufeff" + buf.getvalue()).encode("utf-8"), ctype  # BOM：Excel で開いたとき文字化けしないように
+    out = [f"# 企画案の一覧：{slug}", "", f"- 書き出し：{now()}　{len(rows)}案", "", "## テーマ", "", theme_text(st["theme"]), "",
+           "## 一覧", "", "| 案 | 仮タイトル | ジャンル | 分類 | 骨格（一行） | モデル |", "|---|---|---|---|---|---|"]
+    cell = lambda x: str(x or "").replace("|", "／").replace("\n", " ")  # noqa: E731
+    out += [f"| {r['id']} | {cell(r['title'])} | {cell(r['genre'])} | {cell(r['label'])} | {cell(r['sk_one_line'])} | {cell(r['model'].split('/')[-1])} |" for r in rows]
+    for r in rows:
+        out += ["", "---", "", f"## {r['id']}　{r['title']}", "",
+                f"- モデル：{r['model']}　ラウンド：{r['round']}　種類：{r['kind']}　ジャンル：{r['genre']}" + (f"　元の案：{r['parent']}" if r["parent"] else "")]
+        if r["label"]:
+            out.append(f"- 分類：{r['label']}" + (f"（いちばん近い案 {r['nearest']}・近さ {r['sim']}）" if r["nearest"] else ""))
+        if r["sk_one_line"]:
+            out.append("- 骨格：" + "／".join(v for v in (r[f"sk_{k}"] for k in similarity.SK_FIELDS) if v) + f"（{r['sk_one_line']}）")
+        for f in ("setting", "synopsis", "highlight", "appeal", "must_keep", "genre_reason"):
+            if r[f]:
+                out += ["", f"### {PROPOSAL_JA[f]}", "", str(r[f]).strip()]
+    return name, ("\n".join(out).strip() + "\n").encode("utf-8"), ctype
 
 
 # ---------------------------------------------------------------- BRIEF
