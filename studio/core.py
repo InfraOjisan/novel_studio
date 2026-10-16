@@ -39,6 +39,7 @@ DEFAULT_SETTINGS = {
     "threshold": 0.5,
     "skeleton_batch": 3,      # 骨格の抜き出しで、1回に頼む案の数（多いと上流のプロバイダが時間切れで諦める）
     "skeleton_parallel": 2,   # 骨格の抜き出しを同時に何本まで走らせるか
+    "model_recent_days": 90,  # モデルの一覧に、ふだん出す「新しいモデル」の日数（ほかは検索か「すべて表示」で）
     # 表紙の画像生成モデル。一覧（/images/models）にあるものから、この順で既定を選ぶ
     "cover_models": ["google/gemini-2.5-flash-image", "openai/gpt-image-2", "bytedance-seed/seedream-4.5", "black-forest-labs/flux.2-pro"],
 }

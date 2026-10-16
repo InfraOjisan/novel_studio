@@ -13,6 +13,7 @@
   MOCK_FAIL_FINAL=K          最終審査で第K章に重大な指摘を出し続ける（第K章を上位モデルで直すまで）
   MOCK_RESCUE_FAIL_MODEL=M   このモデル（カンマ区切り）で rescue した章は、審査に通らないままにする（別のモデルを選ぶ経路を通すため）
   MOCK_DELAY=秒              1回の応答を遅らせる（進み具合の表示を見るため）
+  MOCK_MODELS_FILE=path       /models に、そのファイル（OpenRouter の /models の写し）を返す（モデルの一覧を実際の件数で試すため）
   MOCK_SKELETON_MAX=N        骨格の抜き出しで、1回に N 案より多く頼まれたら失敗する（上流が時間切れで諦めるのを真似る。小分けの経路を通すため）
   MOCK_FAIL_SKELETON=P03,P05 この案を含む骨格の依頼は必ず失敗する（取れない案が残る経路を通すため）
 
@@ -283,6 +284,9 @@ class H(BaseHTTPRequestHandler):
         if self.path.rstrip("/").endswith("/images/models") or "output_modalities=image" in self.path:
             return self._json(200, {"data": [{"id": m, "name": m, "architecture": {"input_modalities": ["text"], "output_modalities": ["image"]},
                                               "pricing": {"image": str(p)}} for m, p in IMAGE_MODELS]})
+        if self.path.rstrip("/").endswith("/models") and os.environ.get("MOCK_MODELS_FILE"):  # 本物の一覧の写しを返す（画面の一覧を、実際の件数で試すため）
+            with open(os.environ["MOCK_MODELS_FILE"], encoding="utf-8") as f:
+                return self._json(200, json.load(f))
         if self.path.rstrip("/").endswith("/models"):
             return self._json(200, {"data": [{"id": m, "name": m, "context_length": 200000,
                                               "pricing": {"prompt": f"{i / 1e6:.10f}", "completion": f"{o / 1e6:.10f}"}} for m, i, o in MODELS]})

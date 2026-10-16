@@ -56,9 +56,11 @@ def find_key():
 
 
 def models(refresh=False):
-    """[{id, name, in_per_m, out_per_m, context}]。OpenRouter の /models は鍵なしで読める。1日キャッシュ。"""
+    """[{id, name, in_per_m, out_per_m, context, created, free, expires}]。OpenRouter の /models は鍵なしで読める。1日キャッシュ（refresh で取り直す）。
+    文章を返さないモデル（画像だけなど）、:batch（チャットでは使えない）、提供が終わったモデルは外す。
+    created（出た日）・free（無料）・expires（提供の終わる日）は、画面でモデルの一覧を絞るのに使う。"""
     CACHE.mkdir(exist_ok=True)
-    f = CACHE / f"models_{_base_tag()}.json"
+    f = CACHE / f"models_v2_{_base_tag()}.json"  # v2：created などを持つ形（古いキャッシュは読まない）
     if f.exists() and not refresh and time.time() - f.stat().st_mtime < 86400:
         cached = _read_cache(f)
         if cached is not None:
@@ -66,17 +68,7 @@ def models(refresh=False):
     try:
         with urllib.request.urlopen(urllib.request.Request(base_url() + "/models", headers={"User-Agent": wire.UA}), timeout=20) as r:
             data = json.loads(r.read().decode("utf-8")).get("data", [])
-        out = []
-        for m in data:
-            p = m.get("pricing") or {}
-            try:
-                pin, pout = float(p.get("prompt") or 0) * 1e6, float(p.get("completion") or 0) * 1e6
-            except ValueError:
-                pin = pout = 0.0
-            if not pin and not pout:  # OpenCode の /models は価格を返さない：公開価格の表で補う
-                pin, pout = wire._prices().get(m["id"], (0.0, 0.0))
-            out.append({"id": m["id"], "name": m.get("name", m["id"]), "in_per_m": round(pin, 4), "out_per_m": round(pout, 4),
-                        "context": m.get("context_length")})
+        out = [e for e in (_model_entry(m) for m in data) if e]
         out.sort(key=lambda x: x["id"])
         _write_cache(f, out)
         return out
@@ -120,6 +112,33 @@ def _write_cache(f, data):
     tmp.replace(f)
 
 
+def _model_entry(m):
+    """/models の1件を、画面で使う形にする。使えないモデルは None。"""
+    mid = m.get("id") or ""
+    if not mid or mid.endswith(":batch"):
+        return None
+    arch = m.get("architecture") or {}
+    outs = arch.get("output_modalities")
+    if outs and "text" not in outs:
+        return None
+    exp = str(m.get("expiration_date") or "")[:10]
+    if exp and exp < time.strftime("%Y-%m-%d"):
+        return None
+    p = m.get("pricing") or {}
+    try:
+        pin, pout = float(p.get("prompt") or 0) * 1e6, float(p.get("completion") or 0) * 1e6
+    except ValueError:
+        pin = pout = 0.0
+    if pin < 0 or pout < 0:  # 振り分け役のモデル（openrouter/auto など）は -1：価格は決まっていない
+        return {"id": mid, "name": m.get("name", mid), "in_per_m": None, "out_per_m": None, "context": m.get("context_length"),
+                "created": int(m.get("created") or 0) or None, "free": False, "expires": exp or None}
+    free = mid.endswith(":free") or ("prompt" in p and pin == 0 and pout == 0)
+    if not pin and not pout:  # OpenCode の /models は価格を返さない：公開価格の表で補う
+        pin, pout = wire._prices().get(mid, (0.0, 0.0))
+    return {"id": mid, "name": m.get("name", mid), "in_per_m": round(pin, 4), "out_per_m": round(pout, 4),
+            "context": m.get("context_length"), "created": int(m.get("created") or 0) or None, "free": bool(free), "expires": exp or None}
+
+
 def _read_cache(f):
     """キャッシュが無い・壊れている（古い版が書きかけで残した）ときは None。"""
     try:
@@ -130,7 +149,7 @@ def _read_cache(f):
 
 def price_of(model):
     for m in models():
-        if m["id"] == model:
+        if m["id"] == model and m.get("in_per_m") is not None:
             return m["in_per_m"] / 1e6, m["out_per_m"] / 1e6
     return None
 
