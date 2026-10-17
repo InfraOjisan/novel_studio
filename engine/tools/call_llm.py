@@ -55,6 +55,9 @@ class ApiError(Exception):
     pass
 
 
+ABORT_REASONING = None  # profiles.*.reasoning_abort_chars（run が設定）。本文が出ないまま推論がこれを超えたら締め切りを待たずに打ち切る
+
+
 class Deadline(Exception):
     """1回の呼び出しが壁時計の締め切り（profiles.*.deadline_sec）を過ぎた。推論の暴走を打ち切って投げ直すため。"""
 
@@ -112,6 +115,8 @@ def stream_once(url, key, body, prog, idle_timeout, deadline=None):
             line = raw.decode("utf-8", "replace").strip()
             if not line:
                 continue
+            if ABORT_REASONING and prog.content == 0 and prog.reasoning > ABORT_REASONING:
+                raise Deadline(f"推論が{prog.reasoning}字を超えても本文が出ない（打ち切りの目安 {ABORT_REASONING}字）")
             if deadline:
                 el = time.time() - t_start
                 # 本文がまだ出ていなければ締め切りで、出始めていても1.5倍で打ち切る（書き終わる直前の本文は捨てない）
@@ -183,9 +188,22 @@ def env_value(name):
     return None
 
 
-def build_body(role, task, text):
+# 工程ごとの既定（v1.1.2）。最終審査は全章の記録を読むので、章の審査と同じ締め切り・出力枠では足りない。
+# 作品の config.json より小さい値にはしない（引き上げるだけ）。task_overrides があればそちらが優先。
+TASK_DEFAULTS = {"final": {"deadline_sec": 900, "max_tokens": 32000}}
+
+
+def profile_for(role, task):
     prof = dict(LLM["profiles"][role])
+    for k, v in TASK_DEFAULTS.get(task, {}).items():
+        if isinstance(v, (int, float)) and (prof.get(k) or 0) < v:
+            prof[k] = v
     prof.update(LLM.get("task_overrides", {}).get(task, {}))
+    return prof
+
+
+def build_body(role, task, text):
+    prof = profile_for(role, task)
     # .env の NOVEL_MODEL は model_env_roles に挙げた役にだけ効く（第6回：審査役は config の model を使う。2026-10-11）
     env_roles = LLM.get("model_env_roles")
     if LLM.get("model_env") and env_value(LLM["model_env"]) and (env_roles is None or role in env_roles):
@@ -224,6 +242,9 @@ def log_usage(role, task, model, usage, sec, chars, ok=True, note=""):
     rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "role": role, "task": task, "model": model,
            "in": u.get("prompt_tokens"), "out": u.get("completion_tokens"), "cost": cost,
            "sec": round(sec, 1), "chars": chars, "ok": ok}
+    rt = (u.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    if rt:
+        rec["reasoning"] = rt  # 出力のうち推論に使ったトークン（暴走でどれだけ捨てたかを見る。v1.1.2）
     if cost is None:  # OpenCode は費用を返さない：公開価格（llm_wire.PRICES・llm.prices・NOVEL_LLM_PRICES）で見積もる
         est = wire.estimate_cost(model, u, LLM.get("prices"))
         if est is not None:
@@ -243,7 +264,7 @@ def nonstream_once(base, key, proto, chat_body, prog, idle_timeout, deadline=Non
     msgs = chat_body["messages"]
     system = next((m["content"] for m in msgs if m["role"] == "system"), "")
     user = next((m["content"] for m in msgs if m["role"] == "user"), "")
-    eff = (chat_body.get("reasoning") or {}).get("effort")
+    eff = wire.get_effort(chat_body)
     path, body = wire.build(proto, chat_body["model"], system, user, chat_body.get("temperature"), chat_body.get("max_tokens", 24000),
                             eff, "response_format" in chat_body)
     timeout = int(deadline * 1.5) if deadline else max(600, idle_timeout * 5)
@@ -278,9 +299,41 @@ def run(role, task, text, progress_path=None):
         body.pop("usage", None)  # OpenRouter 固有の欄は送らない
         body.pop("models", None)
     spare = wire.alternatives(proto) if wire.is_opencode(base) else []
+    wire.adapt_reasoning(body, base)  # OpenRouter 以外には標準の reasoning_effort で頼む（v1.1.2）
     idle = LLM.get("idle_timeout_sec", 180)
     # 締め切りも task_overrides で上書きできる（第6回：設計は束が大きく推論が長い。2026-10-11）
-    deadline = {**(LLM.get("profiles", {}).get(role) or {}), **LLM.get("task_overrides", {}).get(task, {})}.get("deadline_sec")
+    prof = profile_for(role, task)
+    deadline = prof.get("deadline_sec")
+    global ABORT_REASONING
+    ABORT_REASONING = prof.get("reasoning_abort_chars")
+    # 推論の暴走（締め切り・出力枠の使い切り）が続いたときに替える予備のモデル。rescue --model で人が選んだときは替えない
+    backups = [] if os.environ.get("NOVEL_MODEL_OVERRIDE") else list(prof.get("fallback_models") or [])
+    raised = False
+
+    def on_runaway(kind):
+        """暴走したら、同じ条件では投げ直さない（v1.1.2）。①推論を一段軽く ②出力枠を広げる（使い切りのとき） ③予備のモデルへ。"""
+        nonlocal raised, proto, spare
+        eff = wire.get_effort(body)
+        if eff in ("high", "medium"):
+            wire.set_effort(body, {"high": "medium", "medium": "low"}[eff])
+            return f"reasoning effort を {wire.get_effort(body)} に下げて再試行します"
+        rmax = (body.get("reasoning") or {}).get("max_tokens")
+        if kind == "length" and rmax and rmax > 4000:
+            body["reasoning"] = {"max_tokens": max(4000, rmax // 2)}
+            return f"推論の上限を {body['reasoning']['max_tokens']} に下げて再試行します"
+        if kind == "length" and not raised and body.get("max_tokens", 0) < 64000:
+            raised = True
+            body["max_tokens"] = min(64000, int(body.get("max_tokens", 16000)) * 2)
+            return f"推論で出力枠を使い切ったため、max_tokens を {body['max_tokens']} に広げて再試行します"
+        if backups:
+            nxt = backups.pop(0)
+            body["model"] = nxt
+            if "models" in body:
+                body["models"] = [nxt] + backups
+            proto = wire.protocol_for(base, nxt, LLM.get("protocols"))
+            spare = wire.alternatives(proto) if wire.is_opencode(base) else []
+            return f"推論が終わらないモデルを諦め、予備のモデル {nxt} に替えて再試行します"
+        return "同じ条件で再試行します（下げる・広げる・替える先がない）"
     prog = Progress(progress_path, task)
     prog.tick(force=True)
     last = None
@@ -308,6 +361,9 @@ def run(role, task, text, progress_path=None):
             if fixable and "temperature" in body and "temperature" in low:
                 body.pop("temperature")  # 推論型のモデルは temperature を受け付けないことがある
                 continue
+            if fixable and "reasoning_effort" in body and "reasoning" in low:
+                body.pop("reasoning_effort")  # 推論の量を指定できないモデル
+                continue
             if e.code in RETRY_HTTP:
                 time.sleep(min(60, 5 * 2 ** attempt))
                 continue
@@ -319,10 +375,8 @@ def run(role, task, text, progress_path=None):
         except Deadline as e:
             last = str(e)
             err(f"attempt {attempt}: {last} → 打ち切って投げ直します")
-            eff = body.get("reasoning", {}).get("effort")
-            if eff in ("high", "medium"):  # 推論が締め切りまで終わらない → 一段軽くして投げ直す（2026-10-11）
-                body["reasoning"] = {"effort": {"high": "medium", "medium": "low"}[eff]}
-                err(f"reasoning effort を {body['reasoning']['effort']} に下げて再試行します")
+            log_usage(role, task, body["model"], None, time.time() - t0, 0, ok=False, note="runaway:deadline")
+            err(on_runaway("deadline"))
             continue
         except Degenerate as e:
             last = str(e)
@@ -340,13 +394,8 @@ def run(role, task, text, progress_path=None):
             log_usage(role, task, model or body["model"], usage, time.time() - t0, 0, ok=False, note=f"empty:{finish}")
             last = f"空の応答（finish_reason={finish}）"
             err(f"attempt {attempt}: {last}")
-            rmax = body.get("reasoning", {}).get("max_tokens")
-            if finish == "length" and rmax and rmax > 4000:
-                body["reasoning"] = {"max_tokens": max(4000, rmax // 2)}  # 上限を指定していても使い切った → 半分にして再試行
-                err(f"推論が max_tokens を使い切ったため、推論の上限を {body['reasoning']['max_tokens']} に下げて再試行します")
-            elif finish == "length" and body.get("reasoning", {}).get("effort") not in (None, "low"):
-                body["reasoning"] = {"effort": "low"}  # 推論で max_tokens を使い切った → 推論を軽くして再試行
-                err("推論が max_tokens を使い切ったため、reasoning effort を low に下げて再試行します")
+            if finish == "length":
+                err(on_runaway("length"))
             time.sleep(3)
             continue
         if finish == "length":
