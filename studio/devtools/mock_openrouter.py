@@ -312,6 +312,29 @@ class H(BaseHTTPRequestHandler):
         model = (body.get("models") or [body.get("model")])[0]
         if model == "mock/broken":
             return self._json(400, {"error": {"message": "mock: this model always fails"}})
+        if model == "mock/runaway":  # 推論だけを流し続けて本文を出さない（審査役の推論の暴走。v1.1.2）
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            try:
+                for _ in range(200):
+                    chunk = {"model": model, "choices": [{"delta": {"reasoning": "考えている。" * 80}}]}
+                    self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())
+                    self.wfile.flush()
+                    time.sleep(0.1)
+                self.wfile.write(b'data: {"choices": [{"delta": {}, "finish_reason": "length"}]}\n\ndata: [DONE]\n\n')
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        if model == "mock/thinker" and int(body.get("max_tokens") or 0) < 32000:  # 出力枠が狭いと推論で使い切って本文が空
+            fin = {"model": model, "choices": [{"delta": {}, "finish_reason": "length"}],
+                   "usage": {"prompt_tokens": 100, "completion_tokens": body.get("max_tokens"), "cost": 0.001,
+                             "completion_tokens_details": {"reasoning_tokens": body.get("max_tokens")}}}
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(f"data: {json.dumps(fin)}\n\ndata: [DONE]\n\n".encode())
+            return
         m = re.match(r"<!-- TASK: (\S+)(?: CH=(\d+))?", text)
         s = re.search(r"<!-- STUDIO: (\S+) -->", text)
         if m:

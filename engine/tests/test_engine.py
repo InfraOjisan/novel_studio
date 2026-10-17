@@ -479,5 +479,84 @@ class ModelList(unittest.TestCase):
         self.assertFalse(e({"id": "gpt-6-luna", "object": "model"})["free"])
 
 
+class Runaway(unittest.TestCase):
+    """審査役の推論の暴走（v1.1.2）：同じ条件で3回繰り返さない。推論を軽く → 出力枠を広げる → 予備のモデルへ。最終審査は止まらない。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.port = free_port()
+        cls.mock = subprocess.Popen([PY, str(REPO / "studio" / "devtools" / "mock_openrouter.py"), "--port", str(cls.port)],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.8)
+        cls.tmp = Path(tempfile.mkdtemp(prefix="novel-run-"))
+        cls.env = dict(os.environ, NOVEL_LLM_BASE_URL=f"http://127.0.0.1:{cls.port}/api/v1", NOVEL_PROVIDER_APIKEY="mock")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.mock.terminate()
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def ctl(self, work, *args, env=None):
+        return subprocess.run([PY, "tools/novelctl.py", *args], cwd=work, capture_output=True, text=True, env=env or self.env,
+                              stdin=subprocess.DEVNULL, timeout=300)
+
+    def usage(self, work):
+        return [json.loads(x) for x in (work / "logs" / "usage.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    def test_adapt_reasoning(self):
+        import llm_wire as w
+        b = w.adapt_reasoning({"reasoning": {"effort": "low"}}, "https://opencode.ai/zen/go/v1")
+        self.assertEqual(b, {"reasoning_effort": "low"})  # OpenAI 互換の標準の書き方
+        b = w.adapt_reasoning({"reasoning": {"effort": "low"}}, "https://openrouter.ai/api/v1")
+        self.assertEqual(b, {"reasoning": {"effort": "low"}})  # OpenRouter はそのまま
+        w.set_effort(b, "medium")
+        self.assertEqual(w.get_effort(b), "medium")
+
+    def test_deadline_switches_to_backup(self):
+        work = self.tmp / "dl"
+        roles = {"reviewer": {"model": "mock/runaway", "deadline_sec": 2, "fallback_models": ["openai/gpt-6-luna-pro"]}}
+        self.assertTrue(scaffold.create(sample_brief(4), work, roles=roles)["ok"])
+        t0 = time.time()
+        r = self.ctl(work, "run")
+        self.assertEqual(r.returncode, 2, r.stdout[-600:] + r.stderr[-600:])  # 予備のモデルで審査が通り canon_hold まで
+        self.assertLess(time.time() - t0, 60)
+        recs = self.usage(work)
+        self.assertTrue(any(x["model"] == "mock/runaway" and x.get("note") == "runaway:deadline" for x in recs))
+        self.assertTrue(any(x["model"] == "openai/gpt-6-luna-pro" and x["ok"] for x in recs))
+        run_len = 0  # 暴走が続くのは「推論を一段軽くする」一回まで。その次は必ず予備のモデル（同じ条件で待ち続けない）
+        for x in recs:
+            run_len = run_len + 1 if x.get("note") == "runaway:deadline" else 0
+            self.assertLessEqual(run_len, 2)
+
+    def test_length_widens_output(self):
+        work = self.tmp / "len"
+        roles = {"reviewer": {"model": "mock/thinker", "max_tokens": 16000, "fallback_models": []}}
+        self.assertTrue(scaffold.create(sample_brief(4), work, roles=roles)["ok"])
+        r = self.ctl(work, "run")
+        self.assertEqual(r.returncode, 2, r.stdout[-600:] + r.stderr[-600:])
+        recs = [x for x in self.usage(work) if x["model"] == "mock/thinker"]
+        self.assertTrue(any(x.get("note") == "empty:length" and x.get("reasoning") == 16000 for x in recs))
+        self.assertTrue(any(x["ok"] for x in recs))
+
+    def test_final_review_runaway_does_not_stop(self):
+        work = self.tmp / "fin"
+        self.assertTrue(scaffold.create(sample_brief(3), work)["ok"])
+        self.assertEqual(self.ctl(work, "run").returncode, 2)
+        cfg = json.loads((work / "config.json").read_text(encoding="utf-8"))
+        cfg["llm"]["task_overrides"]["final"] = {"model": "mock/runaway", "deadline_sec": 1, "fallback_models": []}
+        cfg["llm"]["retries"] = 2
+        (work / "config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        subprocess.run([PY, "tools/guard.py", "seal"], cwd=work, capture_output=True)
+        import hashlib
+        fp = hashlib.sha256((work / "canon" / "CANON.md").read_bytes()).hexdigest()[:8]
+        self.ctl(work, "approve-canon", env=dict(self.env, NOVEL_STUDIO_APPROVE=fp))
+        r = self.ctl(work, "run")
+        self.assertEqual(r.returncode, 3, r.stdout[-800:] + r.stderr[-800:])
+        st = json.loads(self.ctl(work, "status", "--json").stdout)
+        self.assertEqual(st["phase"], "done")
+        self.assertIn("未実施", (work / "output" / "final_report.md").read_text(encoding="utf-8"))
+        self.assertTrue((work / "notes").is_dir())
+
+
 if __name__ == "__main__":
     unittest.main()

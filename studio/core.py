@@ -812,11 +812,11 @@ def cover_args(a):
 
 
 def tools_outdated(slug):
-    """作品フォルダの道具が、表紙（v1.1）・rescue のモデル選択（v1.1）・OpenCode の窓口（v1.1.1）より前の版か。"""
+    """作品フォルダの道具が、表紙（v1.1）・rescue のモデル選択（v1.1）・OpenCode の窓口（v1.1.1）・推論の暴走への対処（v1.1.2）より前の版か。"""
     t = wdir(slug) / "tools"
     wire = t / "llm_wire.py"
     return (not (t / "make_cover.py").exists() or "NOVEL_MODEL_OVERRIDE" not in (t / "novelctl.py").read_text(encoding="utf-8")
-            or not wire.exists() or "x-opencode-session" not in wire.read_text(encoding="utf-8"))
+            or not wire.exists() or "adapt_reasoning" not in wire.read_text(encoding="utf-8"))
 
 
 def upgrade_tools(slug):

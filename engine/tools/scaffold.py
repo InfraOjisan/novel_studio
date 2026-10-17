@@ -302,6 +302,7 @@ def create(b, dest, roles=None, budget=None, extra_top=()):
             shutil.rmtree(dest / d)
         shutil.copytree(ENGINE / d, dest / d, ignore=shutil.ignore_patterns("__pycache__", "scaffold.py"))
     (dest / "templates").mkdir(exist_ok=True)
+    (dest / "notes").mkdir(exist_ok=True)  # 介入の記録（notes/INTERVENTIONS.md）の置き場。v1.1.2
     shutil.copy(ENGINE / "templates" / "LEDGER_TEMPLATE.md", dest / "templates" / "LEDGER_TEMPLATE.md")
     shutil.copy(ENGINE / "AGENTS.md", dest / "AGENTS.md")
     cfg = default_config(b, roles, budget)

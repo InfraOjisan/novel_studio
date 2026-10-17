@@ -98,6 +98,32 @@ def protocol_for(base, model, cfg_protocols=None):
     return "chat"
 
 
+def is_openrouter(base):
+    return "openrouter.ai" in (base or "").lower()
+
+
+def adapt_reasoning(body, base):
+    """/chat/completions の推論の指定を窓口の方言に合わせる（v1.1.2）。
+    OpenRouter は reasoning: {effort | max_tokens}。ほかの OpenAI 互換（OpenCode など）は標準の reasoning_effort だけを読むので書き換える。"""
+    if is_openrouter(base) or "reasoning" not in body:
+        return body
+    r = body.pop("reasoning") or {}
+    if r.get("effort"):
+        body["reasoning_effort"] = r["effort"]
+    return body
+
+
+def get_effort(body):
+    return body.get("reasoning_effort") or (body.get("reasoning") or {}).get("effort")
+
+
+def set_effort(body, eff):
+    if "reasoning_effort" in body:
+        body["reasoning_effort"] = eff
+    else:
+        body["reasoning"] = {"effort": eff}
+
+
 def is_opencode(base):
     """opencode.ai か、その形を真似た窓口（パスに /zen/。テスト用の偽サーバ）。"""
     b = (base or "").lower()

@@ -169,7 +169,7 @@ def _body(proto, base, model, system, prompt, temperature, max_tokens, json_mode
         body["response_format"] = {"type": "json_object"}
     if reasoning:
         body["reasoning"] = {"effort": reasoning}
-    return "/chat/completions", body
+    return "/chat/completions", wire.adapt_reasoning(body, base)
 
 
 def chat(model, prompt, system="", temperature=0.7, max_tokens=16000, json_mode=True, reasoning=None, timeout=600, retries=2, session=None):
@@ -242,8 +242,10 @@ def chat(model, prompt, system="", temperature=0.7, max_tokens=16000, json_mode=
             if attempt < retries:
                 key_mt = "max_output_tokens" if proto == "responses" else "max_tokens"
                 body[key_mt] = int(body[key_mt] * 1.5)
-                if reasoning and proto != "messages":
+                if reasoning and proto == "responses":
                     body["reasoning"] = {"effort": "low"}
+                elif reasoning and proto == "chat":
+                    wire.set_effort(body, "low")
                 attempt += 1
                 continue
             raise LLMError(last)

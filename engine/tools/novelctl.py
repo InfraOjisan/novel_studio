@@ -875,11 +875,22 @@ def step_final(p):
         p["final_state"] = "review"
         return f"output/final.md を結合（{total}字）" + (f"／注意: {' / '.join(notes)}" if notes else "") + " → 最終審査へ"
     pk = build_packet("final")
-    raw = call(pk, P("work", "final_review.out"), "reviewer")
+    try:
+        raw = call(pk, P("work", "final_review.out"), "reviewer")
+    except Escalate as e:
+        # 章の審査と同じ扱い（v1.1.2）：審査役の推論の暴走で最終審査ができなかったら止まらず、「未審査」の印をつけて完成へ。
+        # 全体の整合は、このあとの上位モデルの校正（proofread）を関門にする。
+        runaway = ("締め切り" in e.detail or "推論" in e.detail or "finish_reason=length" in e.detail or "Upstream idle" in e.detail)
+        if e.code != "CALL_FAILED" or not runaway or not CFG.get("review_fallback_on_runaway", True):
+            raise
+        log("FINAL 未審査: 審査役の呼び出しが失敗（推論の暴走）→ 最終審査なしで完成扱い")
+        p["final_unreviewed"] = True
+        raw = json.dumps({"pass": True, "issues": [], "summary": "（最終審査は未実施：審査役が締め切り・出力枠の上限で失敗。校正で全体を確かめてください）"},
+                         ensure_ascii=False)
     j = extract_json(raw) or {"pass": True, "issues": [], "summary": "（最終審査JSONを読めなかった）"}
     high = [i for i in j.get("issues", []) if i.get("severity") == "high"]
     report = ["# 最終レポート", "", f"- 合計字数: {cmd_assemble(quiet=True)}",
-              f"- 最終審査: {'合格' if j.get('pass') and not high else '要確認'}",
+              f"- 最終審査: {'未実施（審査役の推論の暴走。要確認）' if p.get('final_unreviewed') else '合格' if j.get('pass') and not high else '要確認'}",
               f"- 講評: {j.get('summary', '')}", "", "## 指摘"]
     report += [f"- [{i.get('severity')}] 第{i.get('chapter')}章: {i.get('detail')} → {i.get('fix')}" for i in j.get("issues", [])] or ["- なし"]
     report += ["", "## 自動検査の注意"] + ([f"- {x}" for x in p.get("final_notes", [])] or ["- なし"])
