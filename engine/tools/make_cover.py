@@ -29,6 +29,7 @@ import datetime
 import html
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -171,7 +172,77 @@ def log_usage(rec):
 
 
 # ---------------------------------------------------------------- 文字組み
-def cover_html(title, author, style, title_dir, font, art):
+INK_PRESET = {"white": "#fffdf8", "black": "#1d2026"}
+DARK_SCRIM = "10,12,18"     # 明るい文字の下に敷く、暗い影
+LIGHT_SCRIM = "250,248,242"  # 暗い文字の下に敷く、明るい霞
+
+
+def ink_color(ink):
+    """文字の色の指定（auto / white / black / #rrggbb）を色に。auto は None（絵を見て Chrome の中で決める）。"""
+    if ink in INK_PRESET:
+        return INK_PRESET[ink]
+    if isinstance(ink, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", ink):
+        return ink.lower()
+    return None
+
+
+def luminance(hex_color):
+    r, g, b = (int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def scrim_css(title_dir, title_rgb, author_rgb):
+    """題名の側と著者名の側に、文字と反対の明るさの薄い幕を敷く（文字が明るければ暗い幕、暗ければ明るい幕）。"""
+    if title_dir == "vertical":
+        return (f"linear-gradient(to left, rgba({title_rgb},.62) 0, rgba({title_rgb},.35) 24%, rgba({title_rgb},0) 46%), "
+                f"linear-gradient(to top, rgba({author_rgb},.55) 0, rgba({author_rgb},0) 22%)")
+    return (f"linear-gradient(to bottom, rgba({title_rgb},.62) 0, rgba({title_rgb},.3) 26%, rgba({title_rgb},0) 44%), "
+            f"linear-gradient(to top, rgba({author_rgb},.55) 0, rgba({author_rgb},0) 20%)")
+
+
+def shadow_for(color):
+    return ("0 3px 28px rgba(0,0,0,.55), 0 0 2px rgba(0,0,0,.6)" if luminance(color) > 0.5
+            else "0 2px 24px rgba(255,255,255,.65), 0 0 2px rgba(255,255,255,.7)")
+
+
+AUTO_INK_JS = """
+<script>
+// 文字の色を自動で決める（v1.2.1）：題名を置く場所と著者名を置く場所の絵の明るさを測り、
+// 明るい絵には暗い文字と明るい幕、暗い絵には明るい文字と暗い幕を使う。色相は絵の平均の色に寄せる。
+(async () => {
+  const img = document.querySelector('.art');
+  try { await img.decode(); } catch (e) { return; }
+  const W = %(W)d, H = %(H)d, c = document.createElement('canvas');
+  c.width = 160; c.height = 256;
+  const g = c.getContext('2d');
+  const s = Math.max(W / img.naturalWidth, H / img.naturalHeight);  // object-fit: cover と同じ切り取り
+  const dw = img.naturalWidth * s, dh = img.naturalHeight * s;
+  g.drawImage(img, (W - dw) / 2 / 10, (H - dh) / 2 / 10, dw / 10, dh / 10);
+  const measure = (x, y, w, h) => {
+    const d = g.getImageData(x / 10, y / 10, Math.max(1, w / 10), Math.max(1, h / 10)).data;
+    let L = 0, R = 0, G = 0, B = 0, n = 0;
+    for (let i = 0; i < d.length; i += 4) { const r = d[i] / 255, gg = d[i + 1] / 255, b = d[i + 2] / 255;
+      L += 0.2126 * r + 0.7152 * gg + 0.0722 * b; R += r; G += gg; B += b; n++; }
+    return { L: L / n, rgb: [R / n, G / n, B / n] };
+  };
+  const t = measure(...%(TRECT)s), a = measure(...%(ARECT)s);
+  const tint = (rgb, light) => {  // 絵の平均の色をほんの少しだけ混ぜた、白に近い色／黒に近い色
+    const base = light ? [1, 0.992, 0.973] : [0.114, 0.125, 0.149], k = 0.12;
+    return 'rgb(' + base.map((v, i) => Math.round(255 * (v * (1 - k) + (light ? rgb[i] * 0.3 + 0.7 : rgb[i] * 0.4) * k))).join(',') + ')';
+  };
+  const pick = (m) => m.L > 0.58 ? { ink: tint(m.rgb, false), scrim: '%(LIGHT)s', shadow: '0 2px 24px rgba(255,255,255,.65), 0 0 2px rgba(255,255,255,.7)' }
+                                 : { ink: tint(m.rgb, true), scrim: '%(DARK)s', shadow: '0 3px 28px rgba(0,0,0,.55), 0 0 2px rgba(0,0,0,.6)' };
+  const pt = pick(t), pa = pick(a);
+  const T = document.querySelector('.title'), A = document.querySelector('.author');
+  T.style.color = pt.ink; T.style.textShadow = pt.shadow;
+  if (A) { A.style.color = pa.ink; A.style.textShadow = pa.shadow; }
+  document.querySelector('.scrim').style.background = %(SCRIM_JS)s;
+  document.body.dataset.ink = JSON.stringify({ title: pt.ink, author: pa.ink, title_L: +t.L.toFixed(3), author_L: +a.L.toFixed(3) });
+})();
+</script>"""
+
+
+def cover_html(title, author, style, title_dir, font, art, ink="auto"):
     gf, family = FONTS[font]
     e = html.escape
     band = style == "simple" and bool(art)  # シンプル（絵あり）は題名の下に紙の帯を敷く
@@ -181,29 +252,41 @@ def cover_html(title, author, style, title_dir, font, art):
     size = int(max(72, min(210 if title_dir == "vertical" else 190, avail / (n * 1.1))))  # 1.1 は字間（.08em）のぶん
     title_html = "<br>".join(e(x) for x in lines)
     a_size = 62 if len(author) <= 10 else 50
+    fixed = ink_color(ink)
+    script = ""
     if art:
-        bg = f'<img class="art" src="{e(art)}" alt="">'
-        ink, shadow = "#fffdf8", "0 3px 28px rgba(0,0,0,.55), 0 0 2px rgba(0,0,0,.6)"
-        scrim = ("linear-gradient(to left, rgba(10,12,18,.62) 0, rgba(10,12,18,.35) 24%, rgba(10,12,18,0) 46%), "
-                 "linear-gradient(to top, rgba(10,12,18,.55) 0, rgba(10,12,18,0) 22%)" if title_dir == "vertical" else
-                 "linear-gradient(to bottom, rgba(10,12,18,.62) 0, rgba(10,12,18,.3) 26%, rgba(10,12,18,0) 44%), "
-                 "linear-gradient(to top, rgba(10,12,18,.55) 0, rgba(10,12,18,0) 20%)")
+        src = art
+        p = IMG / art
+        if p.exists():  # 絵を data: で埋め込む（自動の文字色で、Chrome の中から絵の明るさを測れるように）
+            mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(p.suffix.lower(), "image/png")
+            src = f"data:{mime};base64," + base64.b64encode(p.read_bytes()).decode()
+        bg = f'<img class="art" src="{e(src)}" alt="">'
+        ink = fixed or INK_PRESET["white"]
+        shadow = shadow_for(ink)
+        side = DARK_SCRIM if luminance(ink) > 0.5 else LIGHT_SCRIM
+        scrim = scrim_css(title_dir, side, side)
+        if not fixed and not band:
+            trect = [1040, 120, 460, 1960] if title_dir == "vertical" else [140, 180, 1320, 700]
+            arect = [120, 1500, 300, 940] if title_dir == "vertical" else [140, 2200, 1320, 220]
+            scrim_js = ("`" + scrim_css(title_dir, "${pt.scrim}", "${pa.scrim}") + "`")
+            script = AUTO_INK_JS % {"W": W, "H": H, "TRECT": json.dumps(trect), "ARECT": json.dumps(arect),
+                                    "LIGHT": LIGHT_SCRIM, "DARK": DARK_SCRIM, "SCRIM_JS": scrim_js}
     else:
         palettes = {"simple": ("#efe9dc", "#22252b", "#b4462f"), "illust": ("#1f3a4d", "#f6efe2", "#e2b04a"), "photo": ("#15171c", "#f2efe8", "#8aa4b8")}
         paper, ink_c, accent = palettes[style]
         bg = (f'<div class="plain" style="background:{paper}"></div>'
               f'<div class="rule" style="background:{accent}"></div>')
-        ink, shadow, scrim = ink_c, "none", "none"
-    # シンプル（絵あり）は、題名の下に紙の帯を敷いて、絵の明るさに関係なく読めるようにする
+        ink, shadow, scrim = fixed or ink_c, "none", "none"
+    # シンプル（絵あり）は、題名の下に紙の帯を敷いて、絵の明るさに関係なく読めるようにする（自動なら帯の上は黒）
     if band:
-        ink, shadow = "#1d2026", "none"
+        ink, shadow = fixed or "#1d2026", "none"
     tpos = ("top: 150px; right: 140px; height: 1900px;" if title_dir == "vertical" else "top: 210px; left: 140px; right: 140px; text-align: center;")
     apos = ("bottom: 170px; left: 150px; height: 900px;" if title_dir == "vertical" else "bottom: 170px; left: 140px; right: 140px; text-align: center;")
     band_css = ""
     if band:
         band_css = (".title { background: rgba(246,242,233,.92); padding: 56px 40px; }" if title_dir == "vertical"
                     else ".title { background: rgba(246,242,233,.92); padding: 40px 56px; }")
-        band_css += ".author { background: rgba(246,242,233,.92); padding: 26px 22px; color: #1d2026; }"
+        band_css += ".author { background: rgba(246,242,233,.92); padding: 26px 22px; color: " + (fixed or "#1d2026") + "; }"
     return f"""<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family={gf}&display=block" rel="stylesheet">
@@ -219,7 +302,7 @@ html, body {{ margin: 0; width: {W}px; height: {H}px; }}
 {band_css}
 </style></head><body><div class="stage">{bg}<div class="scrim"></div>
 <div class="title">{title_html}</div>{f'<div class="author">{e(author)}</div>' if author else ""}
-</div></body></html>"""
+</div>{script}</body></html>"""
 
 
 def split_title(title, per_line):
@@ -316,7 +399,11 @@ def main(argv):
     ap.add_argument("--author", default=None)
     ap.add_argument("--title", default=None)
     ap.add_argument("--reuse-art", action="store_true")
+    ap.add_argument("--ink", default="auto", help="文字の色：auto（絵の明るさに合わせる）/ white / black / #rrggbb")
     a = ap.parse_args(argv)
+    if a.ink != "auto" and not ink_color(a.ink):
+        print(f"文字の色の指定が読めません：{a.ink}（auto / white / black / #rrggbb）")
+        return 1
     c = cfg()
     IMG.mkdir(exist_ok=True)
     prev = json.loads((IMG / "cover.json").read_text(encoding="utf-8")) if (IMG / "cover.json").exists() else {}
@@ -337,7 +424,7 @@ def main(argv):
         log_usage(rec)
         print(f"images/{art} を保存（{len(data) // 1024}KB、{rec['sec']}秒、費用 {rec.get('cost')}）")
     page = IMG / "cover.html"
-    page.write_text(cover_html(title, author, a.style, a.title_dir, a.font, art), encoding="utf-8")
+    page.write_text(cover_html(title, author, a.style, a.title_dir, a.font, art, a.ink), encoding="utf-8")
     out = IMG / "cover.png"
     tmp = IMG / "cover.render.png"
     tmp.unlink(missing_ok=True)
@@ -356,7 +443,7 @@ def main(argv):
                 old.unlink()
         tmp.replace(IMG / "cover.png")
     meta = {"title": title, "author": author, "style": a.style, "style_ja": STYLE[a.style][0], "motif": a.motif,
-            "title_dir": a.title_dir, "font": a.font, "font_ja": FONT_JA[a.font], "model": a.model if not a.reuse_art else prev.get("model"),
+            "title_dir": a.title_dir, "font": a.font, "font_ja": FONT_JA[a.font], "ink": a.ink, "model": a.model if not a.reuse_art else prev.get("model"),
             "art": art, "cover": out.name if out else None, "prompt": prompt or prev.get("prompt"),
             "usd": (rec or {}).get("cost") if rec else (prev.get("usd") if a.reuse_art else 0),
             "ts": datetime.datetime.now().isoformat(timespec="seconds"), "note": err}
