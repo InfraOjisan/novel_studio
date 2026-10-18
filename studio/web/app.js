@@ -1069,6 +1069,7 @@ async function renderFinish() {
 const COVER_STYLE = { simple: "シンプル", illust: "イラスト", photo: "写実" };
 const COVER_FONT = { mincho: "明朝", gothic: "ゴシック", casual: "カジュアル" };
 const COVER_DIR = { vertical: "縦書き", horizontal: "横書き" };
+const COVER_INK = { auto: "自動（絵に合わせる）", white: "白", black: "黒", custom: "色を選ぶ" };
 
 function seg(name, options, value) {
   return `<div class="seg" role="radiogroup">${Object.entries(options).map(([k, v]) =>
@@ -1097,6 +1098,8 @@ async function renderCover() {
   const pref = (S.settings.cover_models || []).find((m) => ids.includes(m));
   const model = cv.model && (cv.model === "none" || ids.includes(cv.model)) ? cv.model : (pref || ids[0] || "none");
   const ts = encodeURIComponent(cv.ts || "");
+  const inkMode = !cv.ink || cv.ink === "auto" ? "auto" : (cv.ink === "white" || cv.ink === "black") ? cv.ink : "custom";
+  const inkHex = /^#[0-9a-f]{6}$/i.test(cv.ink || "") ? cv.ink : "#c9a227";
   box.innerHTML = `<div class="cover-grid">
     <div class="cover-form">
       <p>画像生成モデルには<b>文字のない絵</b>だけを描かせ、題名と著者名はこちらで組んで重ねます（画像生成モデルは日本語の文字、とくに縦書きを正しく描けないことが多いため）。題名は CANON のものを使います。</p>
@@ -1109,10 +1112,15 @@ async function renderCover() {
       <div class="f-group"><span class="muted">題名</span>${seg("cvDir", COVER_DIR, cv.title_dir || "vertical")}</div>
       <div class="f-group"><span class="muted">題名の書体</span>${seg("cvFont", COVER_FONT, cv.font || "mincho")}</div>
       <label class="f">著者名<input type="text" id="cvAuthor" value="${h(cv.author || "")}" placeholder="EPUB の著者にも入ります"></label>
+      <div class="f-group"><span class="muted">文字の色</span>${seg("cvInk", COVER_INK, inkMode)}
+        <input type="color" id="cvInkColor" value="${h(inkHex)}" title="「色を選ぶ」のときの色" ${inkMode === "custom" ? "" : "disabled"}>
+        <span class="muted">自動：題名と著者名を置く場所の絵の明るさを測り、明るい絵には暗い文字、暗い絵には明るい文字にします（色味も絵に少し寄せます）。文字の下には読みやすくする薄い幕を敷きます。</span></div>
       <div class="row"><button class="act" id="cvGo" type="button">表紙を作る</button>
         <button class="ghost" id="cvRe" type="button" ${cv.art ? "" : "disabled"} title="前回の絵はそのままに、題名・書体・著者名だけを組み直します（費用なし）">絵はそのまま、文字だけ組み直す</button></div>
       ${busyLine(["表紙"])}
       ${cv.note ? `<p class="notice">${h(cv.note)}</p>` : ""}
+      ${cv.prompt ? `<details><summary>画像生成モデルに送った文面を見る</summary><pre class="log">${h(cv.prompt)}</pre>
+        <p class="muted">スタイル・モチーフに加えて、BRIEF のジャンル・舞台設定・作品の核の冒頭を「雰囲気づけのためだけ」として送っています。題名は送っていません。</p></details>` : ""}
     </div>
     <div class="cover-preview">${cv.cover ? `<img src="/api/works/${S.slug}/file?path=${encodeURIComponent("images/" + cv.cover)}&t=${ts}" alt="表紙『${h(cv.title || "")}』">
       <p class="muted">${h(cv.style_ja || "")}・${h(cv.font_ja || "")}・${h(COVER_DIR[cv.title_dir] || "")}<br>${h(cv.model === "none" ? "絵なし" : short(cv.model))}${cv.usd ? `　${usd(cv.usd)}` : ""}</p>` :
@@ -1122,11 +1130,14 @@ async function renderCover() {
   const make = (reuse) => guard(async () => {
     const m = $("#cvModel").value;
     if (!reuse && m !== "none" && !confirm(`${short(m)} で絵を描きます（費用がかかります）。よろしいですか。`)) return;
+    const inkSel = val("cvInk");
     const d = await api("POST", `/api/works/${S.slug}/engine`, { action: "cover", model: m, style: val("cvStyle"), motif: $("#cvMotif").value,
-      title_dir: val("cvDir"), font: val("cvFont"), author: $("#cvAuthor").value, reuse_art: reuse });
+      title_dir: val("cvDir"), font: val("cvFont"), author: $("#cvAuthor").value, reuse_art: reuse,
+      ink: inkSel === "custom" ? $("#cvInkColor").value : inkSel });
     const r = await waitJob(d.job, "表紙の作成");
     toast((r.out || r.err || "").trim().split("\n").pop() || "表紙を作りました", r.rc !== 0);
   });
+  box.querySelectorAll("input[name=cvInk]").forEach((r) => (r.onchange = () => ($("#cvInkColor").disabled = val("cvInk") !== "custom")));
   $("#cvGo").onclick = () => make(false);
   $("#cvRe").onclick = () => make(true);
 }

@@ -845,6 +845,9 @@ def cover_args(a):
         out += ["--model", str(a.get("model") or "none")]
     if a.get("title"):
         out += ["--title", str(a["title"])[:80]]
+    ink = str(a.get("ink") or "auto")
+    if ink in ("auto", "white", "black") or re.fullmatch(r"#[0-9a-fA-F]{6}", ink):
+        out += ["--ink", ink]
     return out
 
 
@@ -855,7 +858,8 @@ def tools_outdated(slug):
     return (not (t / "make_cover.py").exists() or "NOVEL_MODEL_OVERRIDE" not in (t / "novelctl.py").read_text(encoding="utf-8")
             or not wire.exists() or "adapt_reasoning" not in wire.read_text(encoding="utf-8")
             or "cmd_canon_check" not in (t / "novelctl.py").read_text(encoding="utf-8")
-            or not (wdir(slug) / "prompts" / "canon_check.md").exists())
+            or not (wdir(slug) / "prompts" / "canon_check.md").exists()
+            or "def ink_color" not in (t / "make_cover.py").read_text(encoding="utf-8"))
 
 
 def upgrade_tools(slug):
