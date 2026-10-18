@@ -238,7 +238,10 @@ def find_chrome():
     cands += ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
               "/Applications/Chromium.app/Contents/MacOS/Chromium",
               "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-              "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"]
+              "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+              # systemd のサービスは PATH に /snap/bin を含まないので、Linux のよくある置き場所も直接見る（v1.2.1）
+              "/usr/bin/google-chrome-stable", "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser",
+              "/snap/bin/chromium"]
     for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge"):
         p = shutil.which(name)
         if p:
@@ -253,7 +256,9 @@ def render(html_path, out_png):
     """Chrome（ヘッドレス）で HTML を 1600×2560 の画像にする。Python のパッケージは要らない。"""
     chrome = find_chrome()
     if not chrome:
-        return "Chrome / Chromium が見つからないので、文字を組んだ表紙を画像にできませんでした（NOVEL_CHROME でパスを指定できます）"
+        return ("Chrome / Chromium が見つからないので、題名と著者名を組んだ表紙を画像にできませんでした。"
+                "Ubuntu なら Google Chrome（.deb）と日本語フォント（fonts-noto-cjk）を入れてから「絵はそのまま、文字だけ組み直す」を押してください"
+                "（NOVEL_CHROME で場所を指定することもできます）")
     with tempfile.TemporaryDirectory() as prof:
         cmd = [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check",
                f"--user-data-dir={prof}", f"--window-size={W},{H + PAD}", "--force-device-scale-factor=1",
