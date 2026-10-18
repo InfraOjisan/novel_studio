@@ -558,5 +558,158 @@ class Runaway(unittest.TestCase):
         self.assertTrue((work / "notes").is_dir())
 
 
+class CanonLint(unittest.TestCase):
+    """v1.2：CANON の日付の機械検査（費用なし）。"""
+
+    def lint(self, text):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("nctl_src", REPO / "engine" / "tools" / "novelctl.py")
+        src = (REPO / "engine" / "tools" / "novelctl.py").read_text(encoding="utf-8")
+        ns = {"re": __import__("re"), "datetime": __import__("datetime")}
+        exec(src[src.index("WEEKDAYS ="):src.index("def cmd_canon_check")], ns)
+        return ns["canon_date_lint"](text)
+
+    def test_period_weekday_order(self):
+        t = """## 1. 舞台
+- 時代・場所・季節の範囲：現代（2026年）。10月9日（金）夜から10月12日（月）朝まで。
+## 3. 時間表
+- 10/10（日）昼 何かが起きる。
+## 12. 章カード
+<!-- CARD:01 -->
+### 第1章「一」
+- 時期と場所：10/9（金）夜。会議室。
+<!-- /CARD:01 -->
+<!-- CARD:02 -->
+### 第2章「二」
+- 時期と場所：10/14（水）。警察。
+<!-- /CARD:02 -->
+<!-- CARD:03 -->
+### 第3章「三」
+- 時期と場所：10/11（日）。社長室。
+<!-- /CARD:03 -->
+"""
+        r = self.lint(t)
+        self.assertTrue(any("10月10日は土曜日" in x for x in r), r)          # 曜日の食い違い
+        self.assertTrue(any("第2章" in x and "期間" in x for x in r), r)     # 期間の外
+        self.assertTrue(any("第3章" in x and "前に戻って" in x for x in r), r)  # 順番が戻る
+        self.assertFalse(any("第1章" in x for x in r), r)
+
+    def test_clean(self):
+        t = "- 時代・場所・季節の範囲：2026年。10月9日（金）から10月19日（月）まで。\n第1章「一」\n- 時期と場所：10/9（金）\n第2章「二」\n- 時期と場所：10/19（月）\n"
+        self.assertEqual(self.lint(t), [])
+
+
+class StudioRestart(unittest.TestCase):
+    """v1.2：承認前の矛盾チェック・画面で CANON を直す・CANON から作り直す・モデルを替える・確定の解除・案の切り出し・窓口の読み替え。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.port = free_port()
+        cls.mock = subprocess.Popen([PY, str(REPO / "studio" / "devtools" / "mock_openrouter.py"), "--port", str(cls.port)],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.8)
+        cls.saved_env = dict(os.environ)
+        os.environ.update(NOVEL_LLM_BASE_URL=f"http://127.0.0.1:{cls.port}/api/v1", NOVEL_PROVIDER_APIKEY="mock")
+        import core
+        cls.core = core
+        cls.saved_works = core.WORKS
+        core.WORKS = Path(tempfile.mkdtemp(prefix="novel-v12-"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.mock.terminate()
+        shutil.rmtree(cls.core.WORKS, ignore_errors=True)
+        cls.core.WORKS = cls.saved_works
+        os.environ.clear()
+        os.environ.update(cls.saved_env)
+
+    def test_localize_model(self):
+        c = self.core
+        ids = ["claude-haiku-5-5", "gpt-6-luna", "deepseek-v4.1-flash"]
+        self.assertEqual(c.localize_model("anthropic/claude-haiku-5.5", ids), "claude-haiku-5-5")
+        self.assertEqual(c.localize_model("deepseek/deepseek-v4.1-flash", ids), "deepseek-v4.1-flash")
+        self.assertEqual(c.localize_model("openai/gpt-6-luna-pro", ids), "openai/gpt-6-luna-pro")  # 読み替え先がなければそのまま
+        self.assertEqual(c.localize_model("claude-haiku-5-5", ["anthropic/claude-haiku-5.5"]), "anthropic/claude-haiku-5.5")
+
+    def test_flow(self):
+        c = self.core
+        roles = {"writer": "anthropic/claude-haiku-5.5", "reviewer": "openai/gpt-6-luna-pro",
+                 "polisher": "anthropic/claude-haiku-5.5", "premium": "anthropic/claude-opus-5.5"}
+        c.create_work("mys", {"genre": "ミステリ", "theme": "密室", "chapters": 3, "chapter_target": 1200})
+        c.propose("mys", ["anthropic/claude-haiku-5.5"], 2)
+        pids = sorted(c.load("mys")["proposals"])
+        c.select("mys", pids[0])
+        v = c.make_brief("mys")
+        c.fix("mys", v, roles, None, {"final": "deepseek/deepseek-v4.1-flash"})
+        cfg = json.loads((c.WORKS / "mys" / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(cfg["llm"]["task_overrides"]["final"]["model"], "deepseek/deepseek-v4.1-flash")  # 工程ごとのモデル
+        self.assertEqual(c.novelctl("mys", "run")["rc"], 2)  # canon_hold
+
+        # 承認の前に矛盾を探す（上位モデル一回・CANON は変えない）
+        fp = c.canon_fingerprint("mys")
+        r = c.engine_action("mys", "canon_check", {})
+        self.assertEqual(r["rc"], 0, r)
+        st = c.engine_status("mys")
+        self.assertEqual(st["canon_check"]["canon_fp"], fp)
+        self.assertTrue(st["canon_check"]["issues"])
+        self.assertEqual(c.canon_fingerprint("mys"), fp)
+
+        # 承認待ちの CANON を人が直す → 指紋が変わる → 承認 → 完成まで
+        canon = (c.WORKS / "mys" / "canon" / "CANON.md").read_text(encoding="utf-8")
+        c.canon_edit("mys", canon.replace("タイトル：霧の帳面", "タイトル：霧の帳面（改）"))
+        fp2 = c.canon_fingerprint("mys")
+        self.assertNotEqual(fp, fp2)
+        c.approve("mys", fp2)
+        self.assertEqual(c.novelctl("mys", "run")["rc"], 3)
+
+        # 書き終えてから CANON を直す → 鍵をかけ直し、第2章から書き直し
+        c.canon_edit("mys", canon.replace("タイトル：霧の帳面", "タイトル：霧の帳面（再）"), reset_from=2)
+        st = c.engine_status("mys")
+        self.assertEqual((st["phase"], st["current"]), ("chapters", 2))
+        self.assertTrue(st["canon_locked"])
+        self.assertEqual([ch["state"] for ch in st["chapters"]], ["done", "pending", "pending"])
+        g = subprocess.run([PY, "tools/guard.py", "check"], cwd=c.WORKS / "mys", capture_output=True, text=True)
+        self.assertEqual(g.returncode, 0, g.stdout)
+
+        # 執筆中でも、指示を足して CANON から作り直す
+        r = c.engine_action("mys", "redesign", {"feedback": "期間と章の日付を揃える", "reset": True})
+        self.assertEqual(r["rc"], 0, r)
+        st = c.engine_status("mys")
+        self.assertEqual(st["phase"], "design")
+        self.assertEqual([ch["state"] for ch in st["chapters"]], ["pending"] * 3)
+
+        # 確定のあとでモデルを替える（指紋を取り直すので見張り番は止めない）
+        r = c.set_roles("mys", {"reviewer": "deepseek/deepseek-v4.1-flash"}, {"final": ""})
+        self.assertTrue(r["changed"])
+        cfg = json.loads((c.WORKS / "mys" / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(cfg["llm"]["profiles"]["reviewer"]["model"], "deepseek/deepseek-v4.1-flash")
+        self.assertNotIn("model", cfg["llm"]["task_overrides"].get("final", {}))
+        g = subprocess.run([PY, "tools/guard.py", "check"], cwd=c.WORKS / "mys", capture_output=True, text=True)
+        self.assertEqual(g.returncode, 0, g.stdout)
+        self.assertIn("モデルを替えた", (c.WORKS / "mys" / "notes" / "INTERVENTIONS.md").read_text(encoding="utf-8"))
+
+        # 確定を解除して BRIEF に戻る（成果は退けるだけ）→ 確定し直せる
+        spent = c.costs("mys")["engine_usd"]
+        r = c.unfix("mys", "BRIEF の時間の設計から直す")
+        st = c.load("mys")
+        self.assertIsNone(st["fixed"])
+        self.assertTrue((c.WORKS / "mys" / r["archive"] / "canon" / "CANON.md").exists())
+        self.assertFalse((c.WORKS / "mys" / "config.json").exists())
+        self.assertAlmostEqual(c.costs("mys")["engine_usd"], spent)  # 退けた分の費用も数える
+        self.assertEqual(c.stage_of(st), "brief")
+        c.fix("mys", v, roles)
+        self.assertEqual(c.novelctl("mys", "run")["rc"], 2)
+
+        # 案を別の作品として切り出す（確定済みの作品からでも。元の作品は変えない）
+        before = (c.WORKS / "mys" / "studio.json").read_bytes()
+        st2 = c.spinoff("mys", pids[1], "mys-b")
+        self.assertEqual((st2["selected"], st2["proposals"]["P01"]["parent"]), ("P01", f"mys:{pids[1]}"))
+        self.assertEqual(c.stage_of(st2), "propose")
+        self.assertEqual((c.WORKS / "mys" / "studio.json").read_bytes(), before)
+        with self.assertRaises(c.StudioError):
+            c.spinoff("mys", pids[1], "mys-b")
+        self.assertTrue(c.make_brief("mys-b"))
+
+
 if __name__ == "__main__":
     unittest.main()

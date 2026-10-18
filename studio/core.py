@@ -53,11 +53,43 @@ def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
-def settings():
+def model_key(mid):
+    """窓口をまたいでモデルを見分ける鍵：会社名の接頭辞を外し、. と - を同じに扱う（anthropic/claude-haiku-5.5 ＝ claude-haiku-5-5）。"""
+    return str(mid or "").split("/")[-1].lower().replace(".", "-")
+
+
+def localize_model(mid, ids):
+    """いまの窓口のモデル名に読み替える（v1.2）。OpenRouter と OpenCode を切り替えたとき、前の窓口の名前が残らないように。
+    一覧が空（取れていない）か、そのままある、か、読み替え先がないときは元のまま。"""
+    if not mid or not ids or mid in ids:
+        return mid
+    k = model_key(mid)
+    hit = [i for i in ids if model_key(i) == k]
+    return hit[0] if hit else mid
+
+
+def localize_settings(s, ids):
+    s = dict(s)
+    s["propose_models"] = [localize_model(m, ids) for m in s.get("propose_models", [])]
+    for k in ("skeleton_model", "brief_model"):
+        s[k] = localize_model(s.get(k), ids)
+    s["roles"] = {r: localize_model(m if isinstance(m, str) else (m or {}).get("model"), ids) for r, m in (s.get("roles") or {}).items()}
+    s["tasks"] = {t: localize_model(m, ids) for t, m in (s.get("tasks") or {}).items()}
+    return s
+
+
+def settings(ids=None):
+    """既定 → settings.json → settings.json の by_base（いまの窓口の分）の順に重ね、いまの窓口のモデル名に読み替える。"""
     s = dict(DEFAULT_SETTINGS)
     if SETTINGS_FILE.exists():
         s.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
-    return s
+    s.update((s.pop("by_base", None) or {}).get(llm.base_url(), {}))
+    if ids is None:
+        try:
+            ids = [m["id"] for m in llm.models()]
+        except Exception:  # noqa: BLE001  一覧が取れなくても設定は返す
+            ids = []
+    return localize_settings(s, ids)
 
 
 def lock(slug):
@@ -108,8 +140,10 @@ def costs(slug):
             out["studio_usd"] += float(r.get("usd") or 0)
             out["estimated"] += 1 if r.get("price") == "estimated" else 0
             out["unpriced"] += 1 if r.get("price") == "unknown" else 0
-    g = wdir(slug) / "logs" / "usage.jsonl"
-    if g.exists():
+    logs = [wdir(slug) / "logs" / "usage.jsonl"] + sorted((wdir(slug) / "studio" / "history").glob("fix*/logs/usage.jsonl"))
+    for g in logs:  # 確定を解除して退けた執筆の費用も数える（v1.2）
+        if not g.exists():
+            continue
         for line in g.read_text(encoding="utf-8").splitlines():
             try:
                 r = json.loads(line)
@@ -706,7 +740,7 @@ def render_brief(slug, v):
 
 
 # ---------------------------------------------------------------- Fix と engine
-def fix(slug, v, roles=None, budget=None):
+def fix(slug, v, roles=None, budget=None, tasks=None):
     """提案と BRIEF を確定し、作品フォルダを engine の作業場所にする。ここから先は BRIEF を変えない。"""
     with lock(slug):
         st = load(slug)
@@ -724,7 +758,9 @@ def fix(slug, v, roles=None, budget=None):
         st["selected"] = b["from"]
         st["log"].append(f"{now()} Fix：{b['from']} と BRIEF v{v}（{r['brief_sha']}）")
         save(slug, st)
-        return st["fixed"]
+    if tasks and any(tasks.values()):  # 工程ごとのモデル（v1.2）
+        set_roles(slug, tasks=tasks)
+    return load(slug)["fixed"]
 
 
 def novelctl(slug, *args, env_extra=None, timeout=3600):
@@ -762,7 +798,8 @@ def approve(slug, fingerprint):
 ENGINE_ACTIONS = {
     "start": lambda a: ["start"],
     "step": lambda a: ["step"],
-    "redesign": lambda a: ["redesign", "--feedback", a["feedback"]],
+    "redesign": lambda a: ["redesign", "--feedback", a["feedback"]] + (["--reset"] if a.get("reset") else []),
+    "canon_check": lambda a: ["canon-check"] + rescue_opts(a),
     "rescue_canon": lambda a: ["rescue", "canon"] + rescue_opts(a),
     "rescue_chapter": lambda a: ["rescue", "chapter", str(int(a["n"]))] + rescue_opts(a),
     "resolve": lambda a: ["resolve"] + [f"--{x}" for x in a.get("flags", []) if x in ("retry", "accept", "relock", "done", "ledger-done")],
@@ -816,11 +853,150 @@ def tools_outdated(slug):
     t = wdir(slug) / "tools"
     wire = t / "llm_wire.py"
     return (not (t / "make_cover.py").exists() or "NOVEL_MODEL_OVERRIDE" not in (t / "novelctl.py").read_text(encoding="utf-8")
-            or not wire.exists() or "adapt_reasoning" not in wire.read_text(encoding="utf-8"))
+            or not wire.exists() or "adapt_reasoning" not in wire.read_text(encoding="utf-8")
+            or "cmd_canon_check" not in (t / "novelctl.py").read_text(encoding="utf-8")
+            or not (wdir(slug) / "prompts" / "canon_check.md").exists())
 
 
 def upgrade_tools(slug):
     return scaffold.upgrade(wdir(slug))
+
+
+# ---------------------------------------------------------------- v1.2：確定のあとで、画面からやり直す
+TASK_JA = {"canon-review": "CANON の審査", "review": "章の審査", "ledger": "章の記録（LEDGER）", "final": "最終審査"}
+
+
+def _engine_idle(slug):
+    try:
+        if engine_status(slug).get("running"):
+            raise StudioError("執筆エンジンが動いています。止まってから操作してください")
+    except StudioError as e:
+        if "動いています" in str(e):
+            raise
+
+
+def _intervention(slug, text):
+    d = wdir(slug) / "notes"
+    d.mkdir(exist_ok=True)
+    with open(d / "INTERVENTIONS.md", "a", encoding="utf-8") as f:
+        f.write(f"- {now()} {text}\n")
+
+
+def set_roles(slug, roles=None, tasks=None, budget=None):
+    """確定のあとで、役ごと・工程ごとのモデルを替える（人の操作）。config.json を書き換え、保護ファイルの指紋を取り直す。
+    予備のモデル（fallback_models）は、いまの窓口にないものを外す（OpenRouter と OpenCode を切り替えたとき）。"""
+    st = load(slug)
+    if not st.get("fixed"):
+        raise StudioError("まだ確定していません。確定の画面で選んでください")
+    _engine_idle(slug)
+    ids = [m["id"] for m in llm.models()]
+    cfgf = wdir(slug) / "config.json"
+    cfg = json.loads(cfgf.read_text(encoding="utf-8"))
+    prof, over = cfg["llm"]["profiles"], cfg["llm"].setdefault("task_overrides", {})
+    changed = []
+    for r, m in (roles or {}).items():
+        m = str(m or "").strip()
+        if r not in prof or not m:
+            continue
+        if not MODEL_ID.match(m):
+            raise StudioError(f"モデル名が不正です：{m}")
+        if prof[r].get("model") != m:
+            changed.append(f"{r}: {prof[r].get('model')} → {m}")
+            prof[r]["model"] = m
+        fb = [localize_model(x, ids) for x in prof[r].get("fallback_models") or []]
+        prof[r]["fallback_models"] = [x for x in fb if not ids or x in ids]
+    for t, m in (tasks or {}).items():
+        if t not in TASK_JA:
+            continue
+        m = str(m or "").strip()
+        cur = (over.get(t) or {}).get("model")
+        if m and not MODEL_ID.match(m):
+            raise StudioError(f"モデル名が不正です：{m}")
+        if m and m != cur:
+            over.setdefault(t, {})["model"] = m
+            changed.append(f"{TASK_JA[t]}: {cur or '役のまま'} → {m}")
+        elif not m and cur:
+            over[t].pop("model", None)
+            changed.append(f"{TASK_JA[t]}: {cur} → 役のまま")
+    if budget is not None:
+        cfg["budget_usd"] = float(budget) if budget else None
+        changed.append(f"予算: {budget or 'なし'}")
+    if not changed:
+        return {"changed": []}
+    cfgf.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    r = subprocess.run([sys.executable, "tools/guard.py", "seal"], cwd=wdir(slug), capture_output=True, text=True)
+    _intervention(slug, "画面でモデルを替えた（" + "、".join(changed) + "）。config.json の指紋を取り直した")
+    with lock(slug):
+        st = load(slug)
+        st["fixed"]["roles"] = {k: v.get("model") for k, v in prof.items()}
+        st["fixed"]["tasks"] = {t: (over.get(t) or {}).get("model") for t in TASK_JA if (over.get(t) or {}).get("model")}
+        st["log"].append(f"{now()} モデルを替えた：" + "、".join(changed))
+        save(slug, st)
+    return {"changed": changed, "seal": r.returncode == 0}
+
+
+def unfix(slug, reason=""):
+    """確定を解除して BRIEF の工程に戻る（v1.2）。執筆の成果（CANON・本文・記録・出力）は消さずに studio/history/fixN_日時/ へ退ける。
+    BRIEF を直して確定し直すと、CANON の設計からやり直しになる。"""
+    st = load(slug)
+    if not st.get("fixed"):
+        raise StudioError("確定していません")
+    _engine_idle(slug)
+    d = wdir(slug)
+    n = len(st.get("fix_history", [])) + 1
+    arch = d / "studio" / "history" / f"fix{n}_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    arch.mkdir(parents=True, exist_ok=True)
+    for x in list(d.iterdir()):
+        if x.name in ("studio", "studio.json") or x.name.startswith("."):
+            continue
+        shutil.move(str(x), str(arch / x.name))
+    with lock(slug):
+        st = load(slug)
+        st.setdefault("fix_history", []).append({**st["fixed"], "unfixed": now(), "archive": str(arch.relative_to(d)), "reason": reason[:500]})
+        st["fixed"] = None
+        st["log"].append(f"{now()} 確定を解除して BRIEF に戻った（執筆の成果は {arch.relative_to(d)}/）" + (f"：{reason[:200]}" if reason else ""))
+        save(slug, st)
+    return {"archive": str(arch.relative_to(d))}
+
+
+def canon_edit(slug, text, reset_from=None):
+    """人が画面で直した CANON に差し替える。承認済みなら鍵をかけ直し、reset_from があれば第N章以降を未執筆に戻す。"""
+    _engine_idle(slug)
+    if not str(text or "").strip():
+        raise StudioError("CANON が空です")
+    tmp = wdir(slug) / "work" / "canon_edit_input.md"
+    tmp.parent.mkdir(exist_ok=True)
+    tmp.write_text(text, encoding="utf-8")
+    args = ["canon-edit", "--file", "work/canon_edit_input.md"] + (["--reset-from", str(int(reset_from))] if reset_from else [])
+    r = novelctl(slug, *args)
+    if r["rc"] != 0:
+        raise StudioError((r["out"] or r["err"]).strip()[-600:])
+    _intervention(slug, "画面で CANON を直した" + (f"（第{int(reset_from)}章以降を書き直し）" if reset_from else ""))
+    return r
+
+
+def spinoff(src, pid, new_slug):
+    """案を一つ選んで、別の作品として切り出す（v1.2）。テーマと案をそのまま写し、選んだ状態で BRIEF の工程から始める。
+    元の作品には一切触れない。確定済みの作品の案でもよい（同じテーマから何本でも書ける）。"""
+    s = load(src)
+    p = s["proposals"].get(pid)
+    if not p:
+        raise StudioError(f"{pid} がありません")
+    if (new_slug or "").strip() == src:
+        raise StudioError("新しい作品フォルダの名前は、いまの作品とは別にしてください")
+    if wdir(new_slug).exists():
+        raise StudioError(f"作品フォルダ「{new_slug}」はもうあります。別の名前にしてください（候補：{suggest_slug(new_slug)}）")
+    st = create_work(new_slug, s["theme"])
+    st["proposals"] = {"P01": {**p, "id": "P01", "origin": "spinoff", "parent": f"{src}:{pid}", "round": None}}
+    st["next_pid"] = 2
+    st["selected"] = "P01"
+    sk = skeleton_store(s).get(pid)
+    if sk:
+        st["skeletons"] = {"P01": sk}
+    st["derived_from"] = {"slug": src, "pid": pid, "theme_version": s["theme_version"], "at": now(), "changed": [], "kind": "spinoff"}
+    st["log"].append(f"{now()} 《{src}》の {pid}「{p.get('title', '')}」を切り出して作成")
+    save(new_slug, st)
+    return st
 
 
 def cover_info(slug):
@@ -833,7 +1009,7 @@ def engine_action(slug, action, args=None):
     if action == "upgrade":
         r = upgrade_tools(slug)
         return {"rc": 0 if r["ok"] else 2, "out": "道具を最新にしました：" + (", ".join(r.get("changed", [])) or "変更なし"), "err": "；".join(r.get("errors", []))}
-    if action in ("cover", "rescue_canon", "rescue_chapter") and tools_outdated(slug) and (action == "cover" or args.get("model") or args.get("note")):
+    if action in ("cover", "rescue_canon", "rescue_chapter", "canon_check") and tools_outdated(slug) and (action in ("cover", "canon_check") or args.get("model") or args.get("note")):
         raise StudioError("この作品の道具（tools/）は古い版です（表紙・モデルを選んだ手直しが使えません）。「道具を最新にする」を押してください")
     if action == "apply_proofread":
         d = wdir(slug)

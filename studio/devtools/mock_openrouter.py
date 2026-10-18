@@ -157,6 +157,10 @@ def engine_answer(task, ch, text, model=""):
             return json.dumps({"pass": False, "issues": [{"severity": "high", "chapter": int(ff), "detail": "伏線F1の回収が駆け足で、設置の場面と結びついていない（偽モデル）", "fix": "設置の場面の小道具を回収の場面で呼び戻す"}],
                                "carry_over": [], "summary": "最終章が苦しい（偽モデル）"}, ensure_ascii=False)
         return json.dumps({"pass": True, "issues": [], "carry_over": [], "summary": "偽モデルの講評：全章そろっている。"}, ensure_ascii=False)
+    if task == "canon-check":  # 承認前の矛盾チェック（v1.2）
+        return json.dumps({"summary": "偽モデル：時間表の一か所が食い違っている。",
+                           "issues": [{"severity": "high", "where": "第3節", "detail": "偽モデルの指摘：期限の日付が二通りに書かれている",
+                                       "fix": "片方に揃える"}]}, ensure_ascii=False)
     if task == "rescue-canon":
         return section(text, "いまのCANON")
     if task == "proofread":

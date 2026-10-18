@@ -14,8 +14,15 @@
        KIND = design | canon-review | write | review | ledger | final
   python3 tools/novelctl.py check N         第N章の下書き（work/）または確定稿を機械検査
   python3 tools/novelctl.py approve-canon   pause_after_canon=true のとき、CANON確認後に再開（人が端末で。studio はボタンで）
-  python3 tools/novelctl.py redesign (--feedback TEXT | --feedback-file F)
-                                            CANONに人の指示を足して設計をやり直す（設計中・承認待ちのときだけ）
+  python3 tools/novelctl.py redesign (--feedback TEXT | --feedback-file F) [--reset]
+                                            CANONに人の指示を足して設計をやり直す（設計中・承認待ち。--reset なら執筆中でも：
+                                            本文を work/archive/ に退けて第1章から書き直す）
+  python3 tools/novelctl.py canon-check [--model M]
+                                            承認の前に、上位モデルが CANON 全体の矛盾を一度だけ探す（work/canon_check.json）。
+                                            日付・曜日の機械検査（費用なし）は status --json の canon_lint にいつも出る
+  python3 tools/novelctl.py canon-edit --file F [--reset-from N]
+                                            人が直した CANON に差し替える（人の操作）。承認済みなら鍵をかけ直し、
+                                            --reset-from N で第N章以降を未執筆に戻す
   python3 tools/novelctl.py rescue canon [--model M] [--note T]
                                             上位モデル（premium）が CANON 全体を一度で直す（審査が収束しないとき）
   python3 tools/novelctl.py rescue chapter N [--model M] [--note T]
@@ -340,6 +347,14 @@ def build_packet(kind, n=None):
         if RESCUE_NOTE.get("text"):
             s += sec("プロデューサーの指示（最優先）", RESCUE_NOTE["text"])
         s += sec("依頼", fill(rd(P("prompts", "rescue_chapter.md")), n))
+    elif kind == "canon-check":
+        s += sec("BRIEF", rd(P("BRIEF.md")))
+        s += series_secs()
+        s += sec("CANON", canon())
+        lint = canon_date_lint(canon())
+        if lint:
+            s += sec("日付の機械検査で見つかったこと（これも指摘に含める）", "\n".join(f"- {x}" for x in lint))
+        s += sec("依頼", fill(rd(P("prompts", "canon_check.md"))))
     elif kind == "proofread":
         s += sec("共通執筆ルール", rules())
         s += sec("CANON（設定書・章カード以外）", canon_core())
@@ -1407,10 +1422,132 @@ def cmd_proofread(args):
     return 0
 
 
+# ---------------------------------------------------------------- v1.2：CANON の矛盾を承認前に拾う
+WEEKDAYS = "月火水木金土日"
+DATE_RE = re.compile(r"(\d{1,2})(?:月|/)(\d{1,2})日?(?:\s*[（(]([月火水木金土日])[)）])?")
+
+
+def canon_date_lint(text):
+    """CANON の日付の機械検査（費用なし）。第1節の期間と章カードの日付、曜日、章の日付の順番。返り値は指摘の文の一覧。"""
+    out = []
+    if not text:
+        return out
+    ym = re.search(r"(20\d\d|19\d\d)年", text)
+    year = int(ym.group(1)) if ym else None
+    if year:  # 曜日（10/9（金）・10月9日（金））
+        seen = set()
+        for m in DATE_RE.finditer(text):
+            mo, d, wd = int(m.group(1)), int(m.group(2)), m.group(3)
+            if not wd or (mo, d, wd) in seen or not (1 <= mo <= 12 and 1 <= d <= 31):
+                continue
+            seen.add((mo, d, wd))
+            try:
+                real = WEEKDAYS[datetime.date(year, mo, d).weekday()]
+            except ValueError:
+                out.append(f"{mo}月{d}日 は存在しない日付です。")
+                continue
+            if real != wd:
+                out.append(f"{year}年{mo}月{d}日は{real}曜日ですが、CANON では（{wd}）になっています。")
+    period = None
+    pm = re.search(r"(?:時代・場所・季節の範囲|期間)[：:](.+)", text)
+    if pm:
+        ds = [(int(a), int(b)) for a, b, _ in DATE_RE.findall(pm.group(1))]
+        if len(ds) >= 2:
+            period = (min(ds), max(ds))
+    marked = re.findall(r"<!-- CARD:(\d+) -->(.*?)<!-- /CARD:\1 -->", text, flags=re.S)
+    if marked:
+        cards = [(int(n), body) for n, body in marked]
+    else:  # 印のない CANON（人が直したものなど）：見出しの「第N章」で区切る
+        parts = re.split(r"\n(?=[#\s]*第\s*\d+\s*章[「『\s])", text)
+        cards = [(int(m.group(1)), c) for c in parts for m in [re.match(r"[#\s]*第\s*(\d+)\s*章", c)] if m]
+    last = None
+    for n, c in cards:
+        tm = re.search(r"時期と場所[：:](.+)", c)
+        if not tm:
+            continue
+        ds = [(int(a), int(b)) for a, b, _ in DATE_RE.findall(tm.group(1)) if 1 <= int(a) <= 12]
+        if not ds:
+            continue
+        first = ds[0]
+        if period and not (period[0] <= first <= period[1]):
+            out.append(f"第{n}章の時期（{first[0]}/{first[1]}）が、第1節の物語の期間（{period[0][0]}/{period[0][1]}〜{period[1][0]}/{period[1][1]}）の外です。")
+        if last and first < last[1]:
+            out.append(f"第{n}章の時期（{first[0]}/{first[1]}）が、第{last[0]}章（{last[1][0]}/{last[1][1]}）より前に戻っています（回想なら章カードにそう書く）。")
+        last = (n, first)
+    return out
+
+
+def cmd_canon_check(args):
+    """承認の前に、上位モデル（または --model のモデル）が CANON 全体の矛盾を一度だけ探す。CANON は変えない。"""
+    try:
+        model, _ = rescue_opts(args)
+    except ValueError as e:
+        print(f"NG: {e}")
+        return 1
+    if not CANON.exists():
+        print("REFUSED: canon/CANON.md がまだありません。")
+        return 2
+    used = model or premium_model()
+    lint = canon_date_lint(canon())
+    pk = build_packet("canon-check")
+    try:
+        raw = call(pk, P("work", "canon_check.out"), "premium", model)
+    except Escalate as e:
+        print(f"ESCALATE [{e.code}] {e.detail}")
+        return 2
+    j = extract_json(raw) or {"issues": [], "summary": "（JSON を読めなかった。work/canon_check.out を見てください）"}
+    issues = [{"severity": "high", "where": "日付の機械検査", "detail": x, "fix": "", "source": "lint"} for x in lint]
+    for i in j.get("issues", []) or []:
+        if isinstance(i, dict) and str(i.get("detail", "")).strip():
+            issues.append({"severity": "high" if i.get("severity") == "high" else "low", "where": str(i.get("where", ""))[:80],
+                           "detail": str(i.get("detail", ""))[:600], "fix": str(i.get("fix", ""))[:600], "source": "model"})
+    res = {"ts": datetime.datetime.now().isoformat(timespec="seconds"), "model": used, "canon_fp": sha(CANON)[:8],
+           "summary": str(j.get("summary", ""))[:800], "issues": issues}
+    wr(P("work", "canon_check.json"), json.dumps(res, ensure_ascii=False, indent=1))
+    md = [f"# CANON の矛盾チェック（{used}・{res['ts']}）", "", res["summary"], ""]
+    md += [f"- [{i['severity']}] {i['where']}：{i['detail']}" + (f" → {i['fix']}" if i["fix"] else "") for i in issues] or ["- 指摘なし"]
+    wr(P("work", "canon_check.md"), "\n".join(md) + "\n")
+    log(f"CANON-CHECK by {used}: {len(issues)} issues ({sum(1 for i in issues if i['severity'] == 'high')} high)")
+    print(f"OK: {used} が CANON を確かめました。指摘 {len(issues)} 件（重大 {sum(1 for i in issues if i['severity'] == 'high')} 件）→ work/canon_check.md")
+    return 0
+
+
+def cmd_canon_edit(args):
+    """人が直した CANON に差し替える（studio の「CANON を直す」）。承認済みなら鍵をかけ直す。--reset-from N で第N章以降を未執筆に戻す。"""
+    if "--file" not in args:
+        print("usage: novelctl.py canon-edit --file F [--reset-from N]")
+        return 1
+    text = rd(Path(args[args.index("--file") + 1]))
+    issues = canon_check(text)
+    if issues:
+        print("NG: 直した CANON が機械検査に通りません：" + " / ".join(issues[:5]))
+        return 2
+    p = load()
+    if p["phase"] == "design" and p.get("design_state") == "review" and not p.get("escalation"):
+        print("REFUSED: いま審査役が CANON を審査しています。止まってから直してください。")
+        return 2
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    if CANON.exists():
+        shutil.copy(CANON, P("work", f"canon_before_edit_{stamp}.md"))
+    wr(CANON, text if text.endswith("\n") else text + "\n")
+    p = load()
+    if p.get("canon_sha256"):
+        p["canon_sha256"] = sha(CANON)  # 承認済み：人が直したので鍵をかけ直す
+    if (p.get("escalation") or {}).get("code") == "CANON_MODIFIED":
+        p["escalation"] = None
+    save(p)
+    log(f"CANON-EDIT by human（旧版 work/canon_before_edit_{stamp}.md）")
+    if "--reset-from" in args:
+        cmd_reset(int(args[args.index("--reset-from") + 1]))
+    print(f"OK: CANON を差し替えました（旧版は work/canon_before_edit_{stamp}.md）。指紋 {sha(CANON)[:8]}")
+    return 0
+
+
 def cmd_redesign(args):
     p = load()
-    if p["phase"] not in ("design", "canon_hold"):
-        print(f"REFUSED: いまは {p['phase']} です。再設計は設計中か承認待ちのときだけです。")
+    reset = "--reset" in args and p["phase"] in ("chapters", "final", "done")
+    if p["phase"] not in ("design", "canon_hold") and not reset:
+        print(f"REFUSED: いまは {p['phase']} です。再設計は設計中か承認待ちのとき（執筆中なら --reset をつける）だけです。")
         return 2
     if "--feedback-file" in args:
         text = rd(Path(args[args.index("--feedback-file") + 1]))
@@ -1422,6 +1559,12 @@ def cmd_redesign(args):
     if not CANON.exists():
         print("REFUSED: canon/CANON.md がまだありません。")
         return 2
+    if not text.strip():
+        print("REFUSED: 指示が空です。")
+        return 1
+    if reset:
+        cmd_reset(1)  # 執筆中でも CANON から作り直す（v1.2）：本文と LEDGER を退けてから、設計に戻す
+        p = load()
     wr(P("work", "canon_feedback.md"), "- 【人の指示】" + text.strip().replace("\n", "\n  ") + "\n")
     p.update({"phase": "design", "design_state": "draft", "design_attempts": 0, "canon_sha256": None, "escalation": None})
     save(p)
@@ -1442,7 +1585,9 @@ def status_dict():
          "design": {"state": p["design_state"], "attempts": p["design_attempts"], "max": CFG["max_design_attempts"]},
          "chapters": [], "slots": {}, "escalation": p.get("escalation"), "rescues": p.get("rescues", 0),
          "running": bool(lock_owner()), "inflight": None, "usage": usage_summary(),
-         "budget_usd": CFG.get("budget_usd"), "premium_model": premium_model(), "canon_rescues": p.get("canon_rescues", []), "canon_fp": sha(CANON)[:8] if CANON.exists() else None}
+         "budget_usd": CFG.get("budget_usd"), "premium_model": premium_model(), "canon_rescues": p.get("canon_rescues", []), "canon_fp": sha(CANON)[:8] if CANON.exists() else None,
+         "canon_lint": canon_date_lint(canon()) if CANON.exists() else [],
+         "canon_check": json.loads(rd(P("work", "canon_check.json"))) if P("work", "canon_check.json").exists() else None}
     for k, v in p["chapters"].items():
         f = P("chapters", f"ch{nn(k)}.md")
         d["chapters"].append({"n": int(k), "state": v["state"], "attempts": v["attempts"],
@@ -1541,7 +1686,14 @@ def main(argv):
         with Lock():
             return cmd_proofread(a)
     elif c == "redesign":
-        return cmd_redesign(a)
+        with Lock():
+            return cmd_redesign(a)
+    elif c == "canon-check":
+        with Lock():
+            return cmd_canon_check(a)
+    elif c == "canon-edit":
+        with Lock():
+            return cmd_canon_edit(a)
     elif c == "polish":
         with Lock():
             return cmd_polish(a)

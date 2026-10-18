@@ -244,3 +244,9 @@ label.f.check > span:first-child { display: flex; gap: 8px; align-items: center;
 .mtag.new { border-color: var(--indigo); color: var(--indigo); }
 .mtag.exp { border-color: var(--shu); color: var(--shu); }
 .models { max-height: 340px; }
+
+/* v1.2：CANON のやり直し・矛盾チェック */
+details.redo { margin: 12px 0; border: 1px solid var(--rule); padding: 8px 14px; }
+details.redo summary { cursor: pointer; font-weight: bold; }
+textarea.mono { font-family: var(--mono); font-size: 13px; line-height: 1.5; }
+#dlg:has(textarea.mono) { width: min(980px, 96vw); }

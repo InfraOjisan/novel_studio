@@ -334,6 +334,10 @@ def upgrade(dest):
         if not old.exists() or old.read_bytes() != f.read_bytes():
             shutil.copy(f, old)
             changed.append(f.name)
+    for f in sorted((ENGINE / "prompts").glob("*.md")):  # 新しい工程の依頼文だけ足す（作品ごとに直した依頼文は上書きしない。v1.2）
+        if not (dest / "prompts" / f.name).exists():
+            shutil.copy(f, dest / "prompts" / f.name)
+            changed.append("prompts/" + f.name)
     if changed:
         py = sys.executable or "python3"
         subprocess.run([py, "tools/guard.py", "seal"], cwd=dest, capture_output=True, text=True)
