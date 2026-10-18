@@ -21,7 +21,7 @@
 2. **このフォルダの外に出ない。** 例外は、リポジトリ直下の `.env` を `tools/call_llm.py` が読むことだけ（進行役は `.env` を開かない・表示しない・写さない）。
 3. **モデルの出力を手で直さない。** `canon/`・`chapters/`・`state/`・`work/` を書き換えない。受け箱（`work/inbox/`）に答えを置かない。自分で本文・設定・審査結果を書かない。
 4. **書き換えてはいけないもの。** `AGENTS.md`・`BRIEF.md`・`brief.json`・`config.json`・`tools/`・`prompts/`・`templates/`。指紋（`guard/manifest.json`）で見張られていて、変わると novelctl が止まります。
-5. **人の承認は人がする。** `approve-canon` は人が端末で（または studio のボタンで）行う。`resolve --accept`・`resolve --relock`・`resolve --done`・`reset-chapter`・`tools/guard.py seal` も人の判断で。
+5. **人の承認は人がする。** `approve-canon` は人が端末で（または studio のボタンで）行う。`resolve --accept`・`resolve --relock`・`resolve --done`・`reset-chapter`・`tools/guard.py seal`・`canon-edit`・`redesign --reset` も人の判断で。
 6. **STOP ファイルを見たら止まる。**
 7. **介入は記録する。** `notes/INTERVENTIONS.md` に一行ずつ（日時・何をした・なぜ）。
 8. **章の本文を丸ごと自分の文脈に読み込まない。** 読んでよいのは `status`、`work/*_feedback.md`、`work/*_verdict_*.json`、`output/final_report.md`、`logs/run.log` の末尾。
@@ -37,6 +37,7 @@ python3 tools/call_llm.py --ping premium     # 疎通（上位モデル。例外
 python3 tools/novelctl.py status --json
 python3 tools/novelctl.py start              # 設計 → CANON審査 → CANONロックで止まる（canon_hold）
 #   人が canon/CANON.md を読む（第4節の行動原理、第6節の世界の前提、第13節の差し込み申告）
+python3 tools/novelctl.py canon-check        # 承認の前に、上位モデルが CANON の矛盾を一度だけ探す（費用がかかるので人の指示で）
 python3 tools/novelctl.py approve-canon      # 人が端末で
 python3 tools/novelctl.py start              # 各章 → 記録 → 結合 → 最終審査 → DONE
 python3 tools/guard.py check

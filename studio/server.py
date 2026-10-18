@@ -166,14 +166,23 @@ class H(BaseHTTPRequestHandler):
             if act == "brief_edit":
                 return self._send(200, {"v": core.edit_brief(slug, b["v"], b["brief"])})
             if act == "fix":
-                return self._send(200, core.fix(slug, b["v"], b.get("roles"), b.get("budget")))
+                return self._send(200, core.fix(slug, b["v"], b.get("roles"), b.get("budget"), b.get("tasks")))
+            if act == "roles":  # v1.2：確定のあとでモデルを替える
+                return self._send(200, core.set_roles(slug, b.get("roles"), b.get("tasks"), b.get("budget")))
+            if act == "unfix":  # v1.2：確定を解除して BRIEF に戻る
+                return self._send(200, core.unfix(slug, b.get("reason", "")))
+            if act == "canon":  # v1.2：人が CANON を直す
+                return self._send(200, core.canon_edit(slug, b["text"], b.get("reset_from")))
+            if act == "spinoff":  # v1.2：案を別の作品として切り出す
+                st = core.spinoff(slug, b["pid"], (b.get("new_slug") or "").strip())
+                return self._send(200, {"slug": st["slug"]})
             if act == "approve":
                 return self._send(200, core.approve(slug, b["fingerprint"]))
             if act == "edits":
                 return self._send(200, core.set_edits(slug, b["enabled"]))
             if act == "engine":
                 a = b.get("action")
-                if a in ("rescue_canon", "rescue_chapter", "proofread", "cover"):
+                if a in ("rescue_canon", "rescue_chapter", "proofread", "cover", "canon_check"):
                     return self._send(200, {"job": run_job(slug, a, core.engine_action, slug, a, b)})
                 return self._send(200, core.engine_action(slug, a, b))
             return self._send(404, {"error": "not found"})

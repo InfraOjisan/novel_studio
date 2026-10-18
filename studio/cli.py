@@ -20,10 +20,16 @@
   python3 studio/cli.py brief <slug> [--model m] [--instruction "..."] [--base V]
   python3 studio/cli.py brief-put <slug> <base-V> --file brief.json   自分で書いた BRIEF を新しい版として置く（lint 付き）
   python3 studio/cli.py brief-show <slug> <V> [--markdown]
-  python3 studio/cli.py fix <slug> <V> [--roles roles.json] [--budget 3]
+  python3 studio/cli.py fix <slug> <V> [--roles roles.json] [--tasks tasks.json] [--budget 3]
+  python3 studio/cli.py spinoff <slug> <pid> <new-slug>        案を別の作品として切り出す（BRIEF の工程から。元の作品は変えない）
+  python3 studio/cli.py roles <slug> [--roles roles.json] [--tasks tasks.json] [--budget 3]   確定のあとでモデルを替える（指紋を取り直す）
+        tasks.json = {"canon-review": M, "review": M, "ledger": M, "final": M}（空文字なら役のモデルに戻す）
+  python3 studio/cli.py unfix <slug> [--note "理由"]           確定を解除して BRIEF に戻る（執筆の成果は studio/history/ へ退ける）
+  python3 studio/cli.py canon-put <slug> --file CANON.md [--ch N]  人が直した CANON に差し替える（--ch N で第N章以降を書き直し）
   python3 studio/cli.py engine <slug> <action> [--ch N] [--feedback "..."] [--flags retry,accept] [--chapters 1,2]
         rescue_canon / rescue_chapter は [--model M]（この一回だけ別のモデルで）と [--note "指示"] も取る
-        action = start | step | redesign | rescue_canon | rescue_chapter | resolve | reset_chapter | polish | proofread | assemble | epub | apply_proofread | cover
+        action = start | step | redesign | rescue_canon | rescue_chapter | resolve | reset_chapter | polish | proofread | assemble | epub | apply_proofread | cover | canon_check
+        canon_check は [--model M]（承認の前に CANON の矛盾を一度だけ探す）。redesign は --flags reset で執筆中でも CANON から作り直す
   python3 studio/cli.py engine <slug> cover [--model M|none] [--style simple|illust|photo] [--motif "..."]
         [--title-dir vertical|horizontal] [--font mincho|gothic|casual] [--author "..."] [--reuse-art]
   python3 studio/cli.py image-models                         画像生成モデルの一覧
@@ -101,6 +107,7 @@ def main(argv):
     ap.add_argument("--author", default="")
     ap.add_argument("--reuse-art", dest="reuse_art", action="store_true")
     ap.add_argument("--note", default="")
+    ap.add_argument("--tasks")
     ap.add_argument("--ids", default="")
     ap.add_argument("--fmt", default="md")
     ap.add_argument("--out")
@@ -156,14 +163,22 @@ def main(argv):
                 r.pop("markdown", None)
             return out(r, 0 if r["lint"]["ok"] else 2)
         if a.cmd == "fix":
-            return out(core.fix(A[0], int(A[1]), rd_json(a.roles) if a.roles else None, a.budget))
+            return out(core.fix(A[0], int(A[1]), rd_json(a.roles) if a.roles else None, a.budget, rd_json(a.tasks) if a.tasks else None))
+        if a.cmd == "spinoff":
+            return out(summary(core.spinoff(A[0], A[1], A[2])))
+        if a.cmd == "roles":
+            return out(core.set_roles(A[0], rd_json(a.roles) if a.roles else None, rd_json(a.tasks) if a.tasks else None, a.budget))
+        if a.cmd == "unfix":
+            return out(core.unfix(A[0], a.note))
+        if a.cmd == "canon-put":
+            return out(core.canon_edit(A[0], Path(a.file).read_text(encoding="utf-8"), a.ch))
         if a.cmd == "engine":
             if A[1] in ("rescue_chapter", "reset_chapter") and not a.ch:
                 return out({"error": "--ch（章番号）が必要です"}, 1)
             args = {"n": a.ch, "feedback": a.feedback or "", "flags": [x for x in a.flags.split(",") if x],
                     "chapters": [int(x) for x in a.chapters.split(",") if x],
                     "model": a.model, "style": a.style, "motif": a.motif, "title_dir": a.title_dir, "font": a.font,
-                    "author": a.author, "reuse_art": a.reuse_art, "note": a.note}
+                    "author": a.author, "reuse_art": a.reuse_art, "note": a.note, "reset": "reset" in a.flags.split(",")}
             r = core.engine_action(A[0], A[1], args)
             st = core.engine_status(A[0])
             return out({**r, "status": {k: st.get(k) for k in ("phase", "current", "escalation", "next", "running", "usage")}},

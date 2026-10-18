@@ -38,7 +38,7 @@ import hashlib  # noqa: E402
 SESSION = "novelctl-" + hashlib.sha1(str(ROOT).encode()).hexdigest()[:16]  # 作品ごとに同じ値（x-opencode-session）
 CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
 LLM = CFG["llm"]
-JSON_TASKS = {"canon-review", "review", "final", "proofread"}
+JSON_TASKS = {"canon-review", "review", "final", "proofread", "canon-check"}
 RETRY_HTTP = (408, 409, 425, 429, 500, 502, 503, 504)
 
 

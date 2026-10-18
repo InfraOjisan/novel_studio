@@ -14,6 +14,10 @@ novel_studio v1.0 の道具は、すべて「JSON を入れて JSON を出す」
 | `show <slug> [--brief]` | — | `stage` `proposals` `classify` `briefs` `fixed` `costs` | なし | なし | 許可 |
 | `theme <slug> --theme F` | theme.json | 状態の要約 | 提案・分類・BRIEF を history に退避して最初から | なし | **確認** |
 | `derive <slug> <new-slug> [--theme F]` | theme.json | 状態の要約（`derived_from`） | 新しい `works/<new-slug>/` を作る（元の作品は変えない。名前は必ず別） | なし | 許可 |
+| `spinoff <slug> <pid> <new-slug>` | — | 状態の要約（`derived_from`） | 案を新しい `works/<new-slug>/` に切り出す（元の作品は変えない） | なし | 許可 |
+| `roles <slug> [--roles F] [--tasks F] [--budget N]` | roles.json / tasks.json | `changed` | 確定後に config.json のモデルを替え、指紋を取り直す | なし | **人の許可** |
+| `unfix <slug> [--note T]` | — | `archive` | 確定を解除して BRIEF に戻る（CANON・本文は studio/history/ へ退ける） | なし | **人の許可** |
+| `canon-put <slug> --file F [--ch N]` | CANON.md | novelctl の出力 | CANON を差し替え、承認済みなら鍵をかけ直す（--ch で第N章以降を書き直し） | なし | **人だけ**（進行役は実行しない） |
 | `propose <slug> --models a,b --n 2 [--mode new/resubmit/rolling] [--instruction T]` | — | `round` `proposals[]` `errors{}` | 案を足す | 各モデル1〜2回 | 許可 |
 | `edit <slug> <pid> --fields F` | 欄の JSON | `pid`（新しい案） | 案を足す | なし | 確認 |
 | `revise <slug> <pid> --model m --instruction T` | — | `pid` | 案を足す | 1〜2回 | 許可 |
@@ -27,6 +31,8 @@ novel_studio v1.0 の道具は、すべて「JSON を入れて JSON を出す」
 | `engine <slug> start` | — | `status` | 執筆エンジンを切り離して起動 | 多数（安いモデル） | 許可 |
 | `engine <slug> step` | — | `status` | 1段だけ進める（同期） | 1〜2回 | 許可 |
 | `engine <slug> redesign --feedback T` | — | `status` | 人の指示で CANON を再設計 | — | **確認** |
+| `engine <slug> redesign --feedback T --flags reset` | — | `status` | 執筆中でも本文を退けて CANON から作り直す | — | **人の許可** |
+| `engine <slug> canon_check [--model M]` | — | `status` | 承認の前に上位モデルが CANON の矛盾を一度だけ探す（work/canon_check.md） | premium 1回 | **確認**（費用） |
 | `engine <slug> rescue_canon [--model M] [--note T]` | — | `status` | 上位モデル（または人が選んだモデル）が CANON 全体を一度だけ直す | 1回（上位・高い） | **確認** |
 | `engine <slug> rescue_chapter --ch N [--model M] [--note T]` | — | `status` | 上位モデル（または人が選んだモデル）が第N章の指摘箇所を直す。最終審査で落ちた章にも使える | 1回（上位・高い） | **確認** |
 | `engine <slug> resolve --flags retry/accept/done/ledger-done/relock` | — | `status` | 止まりを解く | なし | **確認**（accept/done/relock は人だけ） |

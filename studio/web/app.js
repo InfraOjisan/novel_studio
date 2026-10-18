@@ -208,13 +208,23 @@ async function refreshModels() {
 }
 
 function modelOptions(selected, filter) {
+  selected = localModel(selected);
   const list = S.models.length ? shortlist([selected].filter(Boolean), filter || "") : [{ id: selected }];
-  return list.map((m) => `<option value="${h(m.id)}" ${m.id === selected ? "selected" : ""}>${h(modelLabel(m))}</option>`).join("");
+  return list.map((m) => `<option value="${h(m.id)}" ${m.id === selected ? "selected" : ""}>${h(modelLabel(m))}${knownModel(m.id) ? "" : "　（いまの窓口にない）"}</option>`).join("");
 }
 
 function modelSelect(id, selected) {
   return `<select id="${id}">${modelOptions(selected)}</select>`;
 }
+
+/* v1.2：窓口（OpenRouter・OpenCode）を切り替えたとき、前の窓口のモデル名を、いまの窓口の名前に読み替える */
+const mkey = (id) => String(id || "").split("/").pop().toLowerCase().replace(/\./g, "-");
+function localModel(id) {
+  if (!id || !S.models.length || S.models.some((m) => m.id === id)) return id;
+  const hit = S.models.find((m) => mkey(m.id) === mkey(id));
+  return hit ? hit.id : id;
+}
+const knownModel = (id) => !S.models.length || S.models.some((m) => m.id === id);
 
 /* ---------------------------------------------------------------- 一 テーマ */
 function themeForm(t = {}) {
@@ -315,6 +325,7 @@ function sheet(p, opts = {}) {
       <button class="ghost small" data-a="revise" type="button" ${fixed ? "disabled" : ""}>指示して改稿</button>
       <button class="act small" data-a="select" type="button" ${fixed ? "disabled" : ""}>この案で BRIEF へ</button>
       <button class="ghost small" data-a="hide" type="button" ${fixed ? "disabled" : ""}>${p.hidden ? "戻す" : "外す"}</button>
+      <button class="ghost small" data-a="spinoff" type="button" title="この案だけを、新しい作品フォルダに切り出して BRIEF から始めます">別の作品にする</button>
     </div>`}
   </article>`;
 }
@@ -406,6 +417,14 @@ function bindActionBar() {
 async function sheetAction(a, pid, btn) {
   const p = S.snap.proposals[pid];
   if (a === "open") { btn.closest(".sheet").classList.toggle("open"); return; }
+  if (a === "spinoff") {
+    const f = await dialog(`<h2>${pid}「${h(p.title)}」を別の作品にする</h2>
+      <p class="muted">テーマとこの案だけを写した新しい作品を作り、BRIEF の工程から始めます。いまの作品は何も変わりません。</p>
+      <label class="f">新しい作品フォルダの名前（英数字・-・_）<input type="text" name="slug" value="${h((S.slug + "-" + pid).toLowerCase().slice(0, 60))}"></label>`, "切り出す");
+    if (!f || !f.slug.trim()) return;
+    const d = await api("POST", `/api/works/${S.slug}/spinoff`, { pid, new_slug: f.slug.trim() });
+    await loadWorks(d.slug); await gotoWork(d.slug); S.view = "brief"; render(); toast(`新しい作品 ${d.slug} を作りました。BRIEF を作ってください。`); return;
+  }
   if (a === "select") { await api("POST", `/api/works/${S.slug}/select`, { pid }); S.view = "brief"; await refresh(); return; }
   if (a === "hide") { await api("POST", `/api/works/${S.slug}/hide`, { pid, hidden: !p.hidden }); await refresh(); return; }
   if (a === "edit") {
@@ -444,7 +463,7 @@ function renderPropose() {
   const snap = S.snap, el = $("#panel-propose");
   const fixed = !!snap.fixed;
   const def = S.settings.propose_models || [];
-  const lastModels = snap.rounds.length ? snap.rounds[snap.rounds.length - 1].models : def;
+  const lastModels = (snap.rounds.length ? snap.rounds[snap.rounds.length - 1].models : def).map(localModel).filter(knownModel);
   const rounds = [...snap.rounds].reverse();
   const roundCost = (r) => r.proposals.reduce((a, pid) => a + (snap.proposals[pid] ? snap.proposals[pid].usd : 0), 0);
   const extra = Object.values(snap.proposals).filter((p) => p.origin !== "model");
@@ -652,16 +671,63 @@ async function renderBrief() {
 }
 
 /* ---------------------------------------------------------------- 五 確定 */
+const TASK_JA = { "canon-review": "CANON の審査", review: "章の審査", ledger: "章の記録（LEDGER）", final: "最終審査" };
+const TASK_HINT = { "canon-review": "設定どうしの矛盾を拾える、推論の確かなモデル", review: "厳格に審査できるモデル", ledger: "正確に抜き出せる安いモデル（推論は短く）", final: "書き手・章の審査役と別系統で、長い文章に強いモデル" };
+
+function taskSelect(id, selected) {  // 工程ごとのモデル：空なら役（審査役）のまま
+  return `<select id="${id}"><option value="" ${selected ? "" : "selected"}>（審査役のまま）</option>${selected || S.models.length ? modelOptions(selected || "") : ""}</select>`;
+}
+
+function rolesForm(roles, tasks, prefix) {
+  return `<div class="form">${Object.keys(ROLE_JA).map((k) => `<label class="f">${ROLE_JA[k]}${modelSelect(prefix + "role-" + k, typeof roles[k] === "string" ? roles[k] : (roles[k] || {}).model)}</label>`).join("")}</div>
+    <details ${Object.values(tasks || {}).some(Boolean) ? "open" : ""}><summary>工程ごとにモデルを替える（任意）</summary>
+      <p class="muted">審査役は、CANON の審査・章の審査・章の記録・最終審査を兼ねています。工程ごとに向くモデルが違うので、ここで替えられます。作る役とチェックする役は、別の会社のモデルにすると同じ見落としをしにくくなります。</p>
+      <div class="form">${Object.keys(TASK_JA).map((t) => `<label class="f">${TASK_JA[t]}<span class="muted">　${TASK_HINT[t]}</span>${taskSelect(prefix + "task-" + t, (tasks || {})[t])}</label>`).join("")}</div>
+    </details>`;
+}
+
+function readRoles(prefix) {
+  const roles = {}, tasks = {};
+  Object.keys(ROLE_JA).forEach((k) => (roles[k] = $("#" + prefix + "role-" + k).value));
+  Object.keys(TASK_JA).forEach((t) => (tasks[t] = $("#" + prefix + "task-" + t).value));
+  return { roles, tasks };
+}
+
 function renderFix() {
   const snap = S.snap, el = $("#panel-fix");
   const f = snap.fixed;
+  const hist = snap.fix_history || [];
+  const histHtml2 = hist.length ? `<details><summary>これまでの確定（${hist.length}回、解除済み）</summary><ol class="hist">${hist.map((x) => `<li>${h(x.ts)} 確定 → ${h(x.unfixed)} 解除。案 ${h(x.proposal)}・BRIEF v${x.brief_v}。成果は ${h(x.archive)}/${x.reason ? `<br><span class="muted">理由「${h(x.reason)}」</span>` : ""}</li>`).join("")}</ol></details>` : "";
   if (f) {
+    const running = snap.engine && snap.engine.running;
     el.innerHTML = `<header><h1>確定</h1></header>
       <div class="ok-box"><p><b>${h(f.ts)}</b> に確定しました。案 ${h(f.proposal)}「${h(snap.proposals[f.proposal] ? snap.proposals[f.proposal].title : "")}」、BRIEF v${f.brief_v}（指紋 ${h(f.brief_sha)}）。</p>
-      <table>${Object.entries(f.roles).map(([k, v]) => `<tr><th>${ROLE_JA[k] || k}</th><td>${h(typeof v === "string" ? v : v.model)}</td></tr>`).join("")}${f.budget ? `<tr><th>予算</th><td>$${h(f.budget)}</td></tr>` : ""}</table></div>
+      <table>${Object.entries(f.roles).map(([k, v]) => { const m = typeof v === "string" ? v : v.model; return `<tr><th>${ROLE_JA[k] || k}</th><td>${h(m)}${knownModel(m) ? "" : ` <b class="lint-ng">いまの窓口にないモデル</b>`}</td></tr>`; }).join("")}
+        ${Object.entries(f.tasks || {}).map(([t, m]) => `<tr><th>${TASK_JA[t] || t}</th><td>${h(m)}${knownModel(m) ? "" : ` <b class="lint-ng">いまの窓口にないモデル</b>`}</td></tr>`).join("")}
+        ${f.budget ? `<tr><th>予算</th><td>$${h(f.budget)}</td></tr>` : ""}</table></div>
       <p>ここから先は作品フォルダ works/${h(S.slug)}/ が執筆エンジンの作業場所です。ハーネス（HermesAgent など）に進行を任せることもできます（harness/ を参照）。</p>
-      <div class="row"><button class="act" id="toCanon" type="button">CANON へ進む</button></div>`;
+      <div class="row"><button class="act" id="toCanon" type="button">CANON へ進む</button></div>
+      <h2>モデルを替える</h2>
+      <p class="muted">窓口（OpenRouter・OpenCode）を替えたときや、審査役が合わなかったときに。作品の config.json を書き換えて、保護ファイルの指紋を取り直します（記録は notes/INTERVENTIONS.md）。いま動いている工程には効かないので、止まっているときに替えてください。</p>
+      ${rolesForm(f.roles, f.tasks, "r")}
+      <div class="row"><button class="act" id="rGo" type="button" ${running ? "disabled" : ""}>このモデルにする</button>${running ? `<span class="muted">執筆エンジンが動いています</span>` : ""}</div>
+      <h2>確定を解除して BRIEF に戻る</h2>
+      <p class="muted">CANON や本文を書き進めてから、BRIEF そのものに直すところが見つかったときに。CANON・本文・記録・出力は消さずに studio/history/ に退けます。BRIEF を直して確定し直すと、CANON の設計からやり直しになります（費用はこれまでの分も合わせて数えます）。</p>
+      <div class="row"><button class="ghost" id="unfix" type="button" ${running ? "disabled" : ""}>確定を解除して BRIEF に戻る</button></div>
+      ${histHtml2}`;
     $("#toCanon").onclick = () => { S.view = "canon"; render(); };
+    $("#rGo").onclick = () => guard(async () => {
+      const { roles, tasks } = readRoles("r");
+      const r = await api("POST", `/api/works/${S.slug}/roles`, { roles, tasks });
+      toast(r.changed.length ? "替えました：" + r.changed.join("、") : "変更はありません"); await refresh();
+    });
+    $("#unfix").onclick = () => guard(async () => {
+      const x = await dialog(`<h2>確定を解除して BRIEF に戻る</h2><p class="muted">いまの CANON・本文は studio/history/ に退けます（消しません）。</p>
+        <label class="f">理由（任意。記録に残ります）<textarea name="reason" rows="3" placeholder="例：CANON の期間と章の日付が合わない。BRIEF の時間の設計から直す"></textarea></label>`, "解除して BRIEF に戻る");
+      if (!x) return;
+      const r = await api("POST", `/api/works/${S.slug}/unfix`, { reason: x.reason });
+      toast(`確定を解除しました（成果は ${r.archive}/）`); S.view = "brief"; await refresh();
+    });
     return;
   }
   const ok = snap.briefs.filter((b) => b.lint.ok);
@@ -673,14 +739,17 @@ function renderFix() {
       <label class="f">予算（ドル。空なら上限なし）<input type="number" id="fB" min="0" step="0.5" placeholder="例 3"></label>
     </div>
     <h2>役ごとのモデル</h2>
-    <p class="muted">書く・照合するのは安いモデルで何度でも。全体の整合を直す・校正は上位モデルで一回だけ。止めるかどうかは人が決めます（グラウヴァル第6回の実績では、上位モデルの出番は設計の修正2回・章の手直し5回・校正1回、残りの約90回は安いモデル）。</p>
-    <div class="form">${Object.keys(ROLE_JA).map((k) => `<label class="f">${ROLE_JA[k]}${modelSelect("role-" + k, roles[k])}</label>`).join("")}</div>
-    <div class="row"><button class="seal" id="fGo" type="button">確定</button><span class="muted">確定すると、この作品のテーマ・提案・BRIEF は変えられなくなります。</span></div>`}`;
+    <p class="muted">書く・照合するのは安いモデルで何度でも。全体の整合を直す・校正は上位モデルで一回だけ。止めるかどうかは人が決めます（グラウヴァル第6回の実績では、上位モデルの出番は設計の修正2回・章の手直し5回・校正1回、残りの約90回は安いモデル）。確定のあとでも、この画面で替えられます。</p>
+    ${rolesForm(roles, S.settings.tasks || {}, "f")}
+    <div class="row"><button class="seal" id="fGo" type="button">確定</button><span class="muted">確定すると、テーマ・提案・BRIEF は固定されます（あとで「確定を解除して BRIEF に戻る」ことはできます）。</span></div>`}
+    ${histHtml2}`;
   if ($("#fGo")) $("#fGo").onclick = () => guard(async () => {
     const v = Number($("#fV").value);
     if (!confirm(`案 ${snap.selected} と BRIEF v${v} で確定します。よろしいですか。`)) return;
-    const rolesSel = {}; Object.keys(ROLE_JA).forEach((k) => (rolesSel[k] = $("#role-" + k).value));
-    await api("POST", `/api/works/${S.slug}/fix`, { v, roles: rolesSel, budget: $("#fB").value ? Number($("#fB").value) : null });
+    const { roles: rolesSel, tasks } = readRoles("f");
+    const bad = Object.values(rolesSel).filter((m) => m && !knownModel(m));
+    if (bad.length && !confirm(`いまの窓口にないモデルがあります（${bad.join("、")}）。このまま確定しますか。`)) return;
+    await api("POST", `/api/works/${S.slug}/fix`, { v, roles: rolesSel, tasks, budget: $("#fB").value ? Number($("#fB").value) : null });
     toast("確定しました"); S.view = "canon"; await refresh();
   });
 }
@@ -716,8 +785,8 @@ function engineBox() {
     const opts = {
       DESIGN_EXHAUSTED: `<button class="act" data-e="rescue_canon" type="button">${(e.canon_rescues || []).length ? "別のモデルで CANON 全体を直す" : "上位モデルで CANON 全体を一度だけ直す"}</button><button class="ghost" data-e="redesign" type="button">指示を足して設計をやり直す</button><button class="ghost" data-e="approve_view" type="button">CANON を読んで、このまま承認する</button>`,
       CHAPTER_EXHAUSTED: `<button class="act" data-e="rescue_chapter" data-n="${n}" type="button">${rescueHist(n).length ? `別のモデルで第${n}章を直す` : `上位モデルで第${n}章の指摘箇所を直す`}</button><button class="ghost" data-e="resolve" data-f="retry" type="button">書き手にもう3稿書かせる</button><button class="ghost" data-e="resolve" data-f="accept" type="button">原稿のまま採用する</button>`,
-      FINAL_REVIEW_FAILED: `<button class="act" data-e="rescue_chapter" data-n="${n}" data-pick="1" type="button">上位モデルで章を直す（最終審査の指摘を直す）</button><button class="ghost" data-e="resolve" data-f="done" type="button">原稿のまま完成とする</button>`,
-      CALL_FAILED: `<button class="ghost" data-e="resolve" type="button">止まった状態を解いて、もう一度</button>`,
+      FINAL_REVIEW_FAILED: `<button class="act" data-e="rescue_chapter" data-n="${n}" data-pick="1" type="button">上位モデルで章を直す（最終審査の指摘を直す）</button><button class="ghost" data-e="resolve" data-f="done" type="button">原稿のまま完成とする</button><button class="ghost" data-e="goto_canon" type="button">CANON からやり直す</button>`,
+      CALL_FAILED: `<button class="ghost" data-e="resolve" type="button">止まった状態を解いて、もう一度</button><button class="ghost" data-e="goto_fix" type="button">モデルを替える</button>`,
       CALL_TIMEOUT: `<button class="ghost" data-e="resolve" type="button">止まった状態を解いて、もう一度</button>`,
     }[x.code] || `<span class="muted">作品フォルダで対応してから「止まった状態を解く」を押してください。</span><button class="ghost" data-e="resolve" type="button">止まった状態を解く</button>`;
     const hist = x.code === "DESIGN_EXHAUSTED" ? (e.canon_rescues || []) : x.code === "CHAPTER_EXHAUSTED" ? rescueHist(n) : [];
@@ -754,22 +823,39 @@ async function rescueDialog(a, extra) {
       ${def ? "" : `<option value="" selected disabled>モデルを選んでください</option>`}
       ${list.map((id) => `<option value="${h(id)}" ${id === def ? "selected" : ""}>${h(id)}${id === premium ? "（指定の上位モデル）" : ""}${tried.has(id) ? "　✓ 試した" : ""}</option>`).join("")}
     </select></label>
-    <label class="f">指示（任意。直し方の手がかり）<textarea name="note" rows="4" placeholder="例：伏線 F2 の回収は第2章の小道具を呼び戻す形で。新しい出来事は足さない"></textarea></label>`, "このモデルで直す");
+    <label class="f">指示（任意。直し方の手がかり）<textarea name="note" rows="${extra.noteDefault ? 10 : 4}" placeholder="例：伏線 F2 の回収は第2章の小道具を呼び戻す形で。新しい出来事は足さない">${h(extra.noteDefault || "")}</textarea></label>`, "このモデルで直す");
   if (!f) return null;
   if (!f.model) { toast("モデルを選んでください", true); return null; }
   return { ...extra, model: f.model === premium ? "" : f.model, note: f.note, n: isCh ? Number(f.n || n) : undefined, label: short(f.model) };
 }
 
 async function engineAct(a, extra = {}) {
-  if (a === "approve_view") { S.view = "canon"; render(); return; }
+  if (a === "approve_view" || a === "goto_canon") { S.view = "canon"; render(); return; }
+  if (a === "goto_fix") { S.view = "fix"; render(); return; }
   if (a === "upgrade") {
     const r = await api("POST", `/api/works/${S.slug}/engine`, { action: "upgrade" });
     toast(r.out || r.err, r.rc !== 0); await refresh(); return;
   }
   if (a === "redesign") {
-    const f = await dialog(`<h2>指示を足して設計をやり直す</h2><p class="muted">あなたの指示は「プロデューサーの決定」として、最優先の修正指示になります。</p><label class="f">指示<textarea name="feedback" rows="6"></textarea></label>`, "設計をやり直す");
+    const f = await dialog(`<h2>${extra.reset ? "CANON から作り直す（本文は第1章から書き直し）" : "指示を足して設計をやり直す"}</h2>
+      <p class="muted">あなたの指示は「プロデューサーの決定」として、最優先の修正指示になります。${extra.reset ? "いまの本文と記録は work/archive/ に退けます（消しません）。" : ""}</p>
+      <label class="f">指示<textarea name="feedback" rows="${extra.feedbackDefault ? 12 : 6}">${h(extra.feedbackDefault || "")}</textarea></label>`, extra.reset ? "作り直す" : "設計をやり直す");
     if (!f || !f.feedback.trim()) return;
     extra.feedback = f.feedback;
+  }
+  if (a === "canon_check") {
+    const e = S.snap.engine || {};
+    const premium = e.premium_model || "";
+    const tried = new Set(((e.canon_check && [e.canon_check.model]) || []));
+    const list = S.models.length ? shortlist([premium].filter(Boolean)).map((m) => m.id) : [premium];
+    const f = await dialog(`<h2>承認の前に、CANON の矛盾を探す</h2>
+      <p class="muted">選んだモデルが CANON 全体を一度だけ読み、設定どうしの食い違い（日付・曜日・回数・物の所在・人物の属性・秘密の扱い）を一覧にします。CANON は変えません。直すかどうかはあなたが決めます。日付と曜日は、費用なしの機械検査でもいつも確かめています。</p>
+      <label class="f">モデル（書き手・審査役と別系統だと、同じ見落としをしにくい）<select name="model">${list.map((id) => `<option value="${h(id)}" ${id === premium ? "selected" : ""}>${h(id)}${id === premium ? "（指定の上位モデル）" : ""}${tried.has(id) ? "　✓ 前回" : ""}</option>`).join("")}</select></label>`, "矛盾を探す");
+    if (!f) return;
+    const d = await api("POST", `/api/works/${S.slug}/engine`, { action: "canon_check", model: f.model === premium ? "" : f.model });
+    const r = await waitJob(d.job, `${short(f.model)} による CANON の矛盾チェック`);
+    toast((r.out || r.err || "").trim().split("\n").pop() || "終わりました", r.rc !== 0);
+    await refresh(); return;
   }
   if (a === "rescue_canon" || a === "rescue_chapter") {
     const opt = await rescueDialog(a, extra);
@@ -805,6 +891,49 @@ function bindEngine(el) {
     n: b.dataset.n ? Number(b.dataset.n) : undefined, flags: b.dataset.f ? [b.dataset.f] : [], pick: !!b.dataset.pick }))));
 }
 
+function canonLintBox(e) {
+  const l = e.canon_lint || [];
+  if (!l.length) return "";
+  return `<div class="notice"><b>日付の機械検査（費用なし）で ${l.length} 件</b><ul>${l.map((x) => `<li>${h(x)}</li>`).join("")}</ul>
+    <span class="muted">CANON の第1節の期間・章カードの「時期と場所」・曜日を突き合わせています。</span></div>`;
+}
+
+function canonIssuesText(e) {
+  const cc = e.canon_check, lines = [];
+  (e.canon_lint || []).forEach((x) => lines.push(`- [日付] ${x}`));
+  if (cc) cc.issues.filter((i) => i.source !== "lint").forEach((i) => lines.push(`- [${i.severity}] ${i.where}：${i.detail}${i.fix ? " → " + i.fix : ""}`));
+  return lines.length ? "次の食い違いを直してください。直すときは、関係するほかの節（時間表・不変条件・伏線スロット・章カード）も同じ事実に揃えること。\n" + lines.join("\n") : "";
+}
+
+function canonCheckBox(e, snap, ph) {
+  const cc = e.canon_check;
+  if (!cc) return "";
+  const stale = cc.canon_fp !== snap.canon_fp;
+  const hi = cc.issues.filter((i) => i.severity === "high").length;
+  const canFix = ["design", "canon_hold"].includes(ph) && !e.running;
+  return `<div class="${hi ? "alarm" : "ok-box"}"><h3>CANON の矛盾チェック（${h(short(cc.model))}・${h(cc.ts)}）${stale ? `<span class="muted">　※この後に CANON が変わっています</span>` : ""}</h3>
+    <p>${h(cc.summary || "")}</p>
+    ${cc.issues.length ? `<table><tr><th>重さ</th><th>どこ</th><th>食い違い</th><th>直し方の案</th></tr>${cc.issues.map((i) => `<tr><td class="${i.severity === "high" ? "lint-ng" : "muted"}">${i.severity === "high" ? "重大" : "軽微"}</td><td>${h(i.where)}</td><td>${h(i.detail)}</td><td>${h(i.fix)}</td></tr>`).join("")}</table>` : `<p>指摘はありませんでした。</p>`}
+    ${cc.issues.length && !e.running ? `<div class="row">${canFix ? `<button class="act" data-cc="rescue" type="button">指摘を指示にして、上位モデルに直させる</button>` : ""}
+      <button class="ghost" data-cc="redesign" type="button">指摘を指示にして、${canFix ? "書き手に設計をやり直させる" : "CANON から作り直す（第1章から書き直し）"}</button></div>` : ""}</div>`;
+}
+
+async function canonEditDialog(ph) {
+  const c = await file("canon/CANON.md");
+  if (!c) { toast("CANON がまだありません", true); return; }
+  const written = ["chapters", "final", "done"].includes(ph);
+  const n = ((S.snap.engine || {}).chapters || []).length;
+  const f = await dialog(`<h2>自分で CANON を直す</h2>
+    <p class="muted">直したところだけ書き換えてください（見出しや &lt;!-- --&gt; の印は消さない）。保存すると旧版を work/ に残し、${written ? "直した CANON で鍵をかけ直します。" : "承認待ちの CANON を差し替えます（承認は別に押します）。"}</p>
+    <textarea name="text" rows="24" class="mono" style="width:100%">${h(c.text)}</textarea>
+    ${written ? `<label class="f">書き直す範囲<select name="reset"><option value="1" selected>第1章から書き直す（おすすめ：CANON が変わると前の章とずれるため）</option>${Array.from({ length: Math.max(0, n - 1) }, (_, i) => `<option value="${i + 2}">第${i + 2}章から書き直す</option>`).join("")}<option value="">本文はそのまま（CANON だけ差し替える）</option></select></label>` : ""}`, "保存する");
+  if (!f) return;
+  if (written && !f.reset && !confirm("本文はそのままで CANON だけ差し替えます。前の章と食い違う可能性があります。よろしいですか。")) return;
+  const r = await api("POST", `/api/works/${S.slug}/canon`, { text: f.text, reset_from: written && f.reset ? Number(f.reset) : null });
+  toast((r.out || "").trim().split("\n").pop() || "保存しました");
+  await refresh();
+}
+
 async function renderCanon() {
   const snap = S.snap, el = $("#panel-canon"), e = snap.engine || {};
   if (!snap.fixed) { el.innerHTML = `<header><h1>CANON</h1></header><p class="notice">先に確定してください。</p>`; return; }
@@ -816,14 +945,30 @@ async function renderCanon() {
       <div class="row"><button class="act" data-e="start" type="button">設計を始める</button></div>` : ""}
     ${ph === "design" && !e.running && started && !e.escalation ? `<div class="row"><button class="act" data-e="start" type="button">続ける</button></div>` : ""}
     ${ph === "design" ? `<p class="muted">設計 ${e.design.attempts}/${e.design.max} 回目（${e.design.state === "review" ? "審査待ち" : "設計中"}）　上位モデルの出番 ${e.rescues || 0} 回</p>` : ""}
+    ${canonLintBox(e)}
     ${ph === "canon_hold" ? `<div class="ok-box"><p>CANON が審査を通りました。下を読み、良ければ承認してください。指紋 <span class="fp">${h(snap.canon_fp)}</span></p>
-      <div class="row"><button class="seal" id="approve" type="button">承認</button><button class="ghost" data-e="redesign" type="button">指示を足して設計をやり直す</button><button class="ghost" data-e="rescue_canon" type="button">上位モデルに全体を見直させる</button></div></div>` : ""}
-    ${["chapters", "final", "done"].includes(ph) ? `<div class="ok-box">承認済み（ロック中）。執筆に進んでいます。<button class="ghost small" id="toWrite" type="button">執筆を見る</button></div>` : ""}
+      <p class="muted">承認の前に、上位モデルに一度だけ矛盾を探させるのがおすすめです（数十円。本文12章ぶんの手戻りより安く済みます）。</p>
+      <div class="row"><button class="act" data-e="canon_check" type="button">承認の前に矛盾を探す</button><button class="seal" id="approve" type="button">承認</button><button class="ghost" data-e="redesign" type="button">指示を足して設計をやり直す</button><button class="ghost" data-e="rescue_canon" type="button">上位モデルに全体を見直させる</button><button class="ghost" id="cEdit" type="button">自分で CANON を直す</button></div></div>` : ""}
+    ${canonCheckBox(e, snap, ph)}
+    ${["chapters", "final", "done"].includes(ph) ? `<div class="ok-box">承認済み（ロック中）。執筆に進んでいます。<button class="ghost small" id="toWrite" type="button">執筆を見る</button></div>
+      <details class="redo" ${e.escalation ? "open" : ""}><summary>CANON に食い違いを見つけたとき（ここからやり直す）</summary>
+        <p class="muted">書き進めてから CANON の食い違いに気づいたときに。いまの本文と記録は消さずに退けます。</p>
+        <div class="row"><button class="ghost" id="cEdit" type="button" ${e.running ? "disabled" : ""}>自分で CANON を直す</button><span class="muted">直した CANON で鍵をかけ直し、選んだ章から書き直します</span></div>
+        <div class="row"><button class="ghost" data-e="canon_check" type="button" ${e.running ? "disabled" : ""}>上位モデルに矛盾を探させる</button><span class="muted">CANON は変えません。指摘の一覧だけ</span></div>
+        <div class="row"><button class="ghost" id="cRedo" type="button" ${e.running ? "disabled" : ""}>指示を足して CANON から作り直す</button><span class="muted">書き手が設計し直し、審査と承認を経て、第1章から書き直します</span></div>
+        <div class="row"><button class="ghost" id="cUnfix" type="button" ${e.running ? "disabled" : ""}>BRIEF から直す</button><span class="muted">確定を解除して BRIEF の工程に戻ります（確定の画面へ）</span></div>
+      </details>` : ""}
     ${ph === "design" && e.escalation && e.escalation.code === "DESIGN_EXHAUSTED" ? `<div class="row"><button class="seal" id="approve" type="button">このまま承認</button><span class="muted">指紋 <span class="fp">${h(snap.canon_fp || "")}</span></span></div>` : ""}
     <h2>CANON</h2><div id="canonDoc" class="doc"><p class="muted">まだありません。</p></div>
     <h2>審査の指摘</h2><div id="canonFb"></div>`;
   bindEngine(el);
   if ($("#toWrite")) $("#toWrite").onclick = () => { S.view = "write"; render(); };
+  if ($("#cEdit")) $("#cEdit").onclick = () => guard(() => canonEditDialog(ph));
+  if ($("#cRedo")) $("#cRedo").onclick = () => guard(() => engineAct("redesign", { reset: true, feedbackDefault: canonIssuesText(e) }));
+  if ($("#cUnfix")) $("#cUnfix").onclick = () => { S.view = "fix"; render(); setTimeout(() => $("#unfix") && $("#unfix").scrollIntoView({ behavior: "smooth" }), 50); };
+  el.querySelectorAll("[data-cc]").forEach((b) => (b.onclick = () => guard(() => b.dataset.cc === "redesign" ?
+    engineAct("redesign", { feedbackDefault: canonIssuesText(e), reset: ["chapters", "final", "done"].includes(ph) }) :
+    engineAct("rescue_canon", { noteDefault: canonIssuesText(e) }))));
   if ($("#approve")) $("#approve").onclick = () => guard(async () => {
     if (!confirm(`CANON（指紋 ${snap.canon_fp}）を承認し、執筆を始めます。よろしいですか。`)) return;
     const r = await api("POST", `/api/works/${S.slug}/approve`, { fingerprint: snap.canon_fp });
