@@ -5,6 +5,7 @@
 - Python 3.9 以上の標準ライブラリだけで動きます（pip install は不要）。
 - モデルは OpenRouter か OpenCode（Go・Zen）。OpenAI 互換の窓口なら差し替え可。
 - 自分の Mac（127.0.0.1）で使う前提です。
+- Mac/Linux/Windows(WSL2)で動作確認済みです。モデルプロバイダーはOpenRouter/OpenCodeGo/ollama(local)/llama.cpp(local)で動作確認済みです。
 
 ```
 git clone https://github.com/InfraOjisan/novel_studio && cd novel_studio
